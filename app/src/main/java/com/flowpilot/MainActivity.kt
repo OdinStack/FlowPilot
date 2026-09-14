@@ -2,6 +2,7 @@ package com.flowpilot
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,25 +24,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.flowpilot.ui.screens.DebugScreen
 import com.flowpilot.ui.screens.HomeScreen
+import com.flowpilot.ui.screens.HomeViewModel
 import com.flowpilot.ui.theme.FlowPilotTheme
 
 class MainActivity : ComponentActivity() {
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        // Permission result handled
-    }
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Request audio permission if not granted
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED) {
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        val neededPermissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            neededPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        val missing = neededPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            requestPermissionsLauncher.launch(missing.toTypedArray())
         }
 
         setContent {
@@ -56,6 +63,7 @@ class MainActivity : ComponentActivity() {
 fun FlowPilotNavigation() {
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Home", "Debug")
+    val homeViewModel: HomeViewModel = viewModel()
 
     Scaffold(
         bottomBar = {
@@ -80,7 +88,10 @@ fun FlowPilotNavigation() {
         }
     ) { paddingValues ->
         when (selectedTab) {
-            0 -> HomeScreen(modifier = Modifier.fillMaxSize().padding(paddingValues))
+            0 -> HomeScreen(
+                viewModel = homeViewModel,
+                modifier = Modifier.fillMaxSize().padding(paddingValues)
+            )
             1 -> DebugScreen(modifier = Modifier.fillMaxSize().padding(paddingValues))
         }
     }
