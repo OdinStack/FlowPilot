@@ -52,7 +52,7 @@ FlowPilot is an intelligent Android assistant that enables users to teach custom
 
 ### Installation
 1. Clone the repository:
-   `ash
+   `bash
    git clone https://github.com/<your-username>/FlowPilot.git
    `
 2. Open the project in Android Studio.
