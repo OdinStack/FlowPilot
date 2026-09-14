@@ -55,4 +55,32 @@ object Constants {
         "close", "dismiss", "cancel", "btn_close", "btn_cancel",
         "dialog_close", "popup_close", "btn_negative"
     )
+
+    fun isSystemOrLauncherPackage(pkg: String): Boolean {
+        if (pkg.isBlank()) return true
+        val lower = pkg.lowercase()
+        val known = setOf(
+            "com.google.android.apps.nexuslauncher",
+            "com.sec.android.app.launcher",
+            "com.android.launcher",
+            "com.android.launcher2",
+            "com.android.launcher3",
+            "com.miui.home",
+            "com.huawei.android.launcher",
+            "com.oppo.launcher",
+            "com.oneplus.launcher",
+            "com.nothing.launcher",
+            "com.android.systemui",
+            "com.samsung.android.honeyboard",
+            "com.samsung.android.app.galaxyfinder",
+            "com.google.android.inputmethod.latin",
+            "com.google.android.googlequicksearchbox"
+        )
+        return pkg in known ||
+                lower.contains("launcher") ||
+                lower.contains("systemui") ||
+                lower.contains("keyboard") ||
+                lower.contains("honeyboard") ||
+                lower.contains("quicksearch")
+    }
 }
