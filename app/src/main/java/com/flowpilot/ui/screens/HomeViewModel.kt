@@ -6,9 +6,13 @@ import androidx.lifecycle.viewModelScope
 import com.flowpilot.engine.SystemMode
 import com.flowpilot.engine.SystemStateMachine
 import com.flowpilot.engine.TeachingCoordinator
+import com.flowpilot.engine.TeachingResult
 import com.flowpilot.voice.VoiceManager
 import com.flowpilot.voice.VoiceState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -23,10 +27,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val recordedActionsCount = teachingCoordinator.recordedActionsCount
     val lastCapturedSummary = teachingCoordinator.lastCapturedSummary
 
+    private val _lastTeachingResult = MutableStateFlow<TeachingResult?>(null)
+    val lastTeachingResult: StateFlow<TeachingResult?> = _lastTeachingResult.asStateFlow()
+
+    fun clearLastTeachingResult() {
+        _lastTeachingResult.value = null
+    }
+
     init {
         voiceManager.initialize()
         viewModelScope.launch(Dispatchers.Main) {
             teachingCoordinator.teachingResults.collect { result ->
+                _lastTeachingResult.value = result
                 val speechMsg = "I learned ${result.actions.size} actions for ${result.targetPackage.substringAfterLast('.')}. Workflow saved."
                 voiceManager.speak(speechMsg)
             }
