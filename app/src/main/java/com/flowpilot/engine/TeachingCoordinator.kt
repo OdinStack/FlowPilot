@@ -84,8 +84,7 @@ class TeachingCoordinator(
 
                 if (detectedTargetPackage == null &&
                     action.packageName.isNotBlank() &&
-                    !action.packageName.contains("launcher", ignoreCase = true) &&
-                    !action.packageName.contains("systemui", ignoreCase = true) &&
+                    !com.flowpilot.util.Constants.isSystemOrLauncherPackage(action.packageName) &&
                     action.packageName != context.packageName
                 ) {
                     detectedTargetPackage = action.packageName
@@ -110,9 +109,14 @@ class TeachingCoordinator(
         val finalActions = service?.stopRecording() ?: rawActions.toList()
 
         val targetPkg = detectedTargetPackage
+            ?: finalActions
+                .filter { it.type == ActionType.CLICK || it.type == ActionType.TYPE }
+                .map { it.packageName }
+                .filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it) && it != context.packageName }
+                .groupBy { it }
+                .maxByOrNull { it.value.size }?.key
             ?: finalActions.firstOrNull {
-                it.type != ActionType.SCREEN_TRANSITION &&
-                !it.packageName.contains("launcher", ignoreCase = true) &&
+                !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) &&
                 it.packageName != context.packageName
             }?.packageName
             ?: ""

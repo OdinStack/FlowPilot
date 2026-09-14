@@ -91,16 +91,8 @@ class FlowPilotAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // Auto-detect target package: lock onto the first NON-LAUNCHER external app the user interacts with
-            if (recordingPackage == null || isLauncherOrSystemPackage(recordingPackage!!)) {
-                if (eventPackage != packageName && !isLauncherOrSystemPackage(eventPackage)) {
-                    recordingPackage = eventPackage
-                    Log.i(TAG, "Auto-locked recording to target package: $recordingPackage")
-                }
-            }
-
-            // If a specific target package was locked, filter out events from other apps (except launcher transitions)
-            if (recordingPackage != null && !isLauncherOrSystemPackage(recordingPackage!!) && eventPackage != recordingPackage) {
+            // If a specific target package was locked, filter out events from other apps
+            if (recordingPackage != null && eventPackage != recordingPackage) {
                 return
             }
 
@@ -113,22 +105,6 @@ class FlowPilotAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_VIEW_SELECTED -> handleSelection(event)
             }
         }
-    }
-
-    private fun isLauncherOrSystemPackage(pkg: String): Boolean {
-        if (pkg.isBlank()) return true
-        val knownLaunchers = setOf(
-            "com.google.android.apps.nexuslauncher",
-            "com.sec.android.app.launcher",
-            "com.android.launcher3",
-            "com.miui.home",
-            "com.huawei.android.launcher",
-            "com.oppo.launcher",
-            "com.oneplus.launcher",
-            "com.nothing.launcher",
-            "com.android.systemui"
-        )
-        return pkg in knownLaunchers || pkg.contains("launcher", ignoreCase = true) || pkg == "com.android.systemui"
     }
 
     override fun onInterrupt() {
