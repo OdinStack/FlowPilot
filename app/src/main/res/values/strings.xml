@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlowPilot</string>
+    <string name="accessibility_service_description">FlowPilot uses accessibility to observe and automate UI interactions for teachable voice workflows.</string>
+</resources>
