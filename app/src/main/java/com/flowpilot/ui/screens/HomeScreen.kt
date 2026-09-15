@@ -24,13 +24,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -40,10 +44,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -118,6 +128,15 @@ fun HomeScreen(
                 MicButton(
                     isListening = isListening,
                     onClick = { viewModel.onMicTapped() }
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                CommandInputField(
+                    onSendCommand = { command ->
+                        viewModel.submitTextCommand(command)
+                    },
+                    enabled = isServiceConnected
                 )
             }
         }
@@ -519,5 +538,67 @@ fun MicButton(
                 tint = MaterialTheme.colorScheme.onPrimary
             )
         }
+    }
+}
+
+@Composable
+fun CommandInputField(
+    onSendCommand: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    var text by remember { mutableStateOf("") }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.weight(1f),
+            placeholder = { Text("Type command (e.g. Add 5 and 2)") },
+            singleLine = true,
+            enabled = enabled,
+            shape = RoundedCornerShape(24.dp),
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Keyboard,
+                    contentDescription = "Keyboard"
+                )
+            },
+            trailingIcon = {
+                if (text.isNotBlank()) {
+                    IconButton(
+                        onClick = {
+                            val cmd = text.trim()
+                            if (cmd.isNotBlank()) {
+                                onSendCommand(cmd)
+                                text = ""
+                            }
+                        },
+                        enabled = enabled
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Send",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(
+                onSend = {
+                    val cmd = text.trim()
+                    if (cmd.isNotBlank()) {
+                        onSendCommand(cmd)
+                        text = ""
+                    }
+                }
+            )
+        )
     }
 }

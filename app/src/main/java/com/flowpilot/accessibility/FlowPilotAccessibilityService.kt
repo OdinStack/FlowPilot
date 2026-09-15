@@ -68,6 +68,19 @@ class FlowPilotAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        try {
+            val info = serviceInfo ?: android.accessibilityservice.AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.flags = info.flags or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.notificationTimeout = 50
+            serviceInfo = info
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to configure serviceInfo", e)
+        }
         instance = this
         _isServiceConnected.value = true
         Log.i(TAG, "AccessibilityService connected")

@@ -19,12 +19,19 @@ class ActionCleaner {
     ): List<RecordedAction> {
         if (actions.isEmpty()) return emptyList()
 
-        return actions
+        val cleaned = actions
             .filterByPackage(targetPackage)
             .mergeDuplicateClicks()
             .mergeTextInputs()
             .removeScrollUndos()
             .reindex()
+
+        return if (cleaned.isNotEmpty()) {
+            cleaned
+        } else {
+            actions.filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
+                .mapIndexed { idx, action -> action.copy(index = idx) }
+        }
     }
 
     private fun List<RecordedAction>.filterByPackage(pkg: String): List<RecordedAction> {

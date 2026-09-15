@@ -5,8 +5,10 @@ import com.flowpilot.data.db.ExecutionLogEntity
 import com.flowpilot.data.db.WorkflowDao
 import com.flowpilot.data.db.WorkflowEntity
 import com.flowpilot.data.models.Workflow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -58,17 +60,23 @@ class WorkflowRepository(private val dao: WorkflowDao) {
             workflowJson = json.encodeToString(workflow),
             createdAt = workflow.createdAt
         )
-        dao.insertWorkflow(entity)
+        withContext(Dispatchers.IO) {
+            dao.insertWorkflow(entity)
+        }
         Log.i(TAG, "Saved workflow: ${workflow.name} (${workflow.id})")
     }
 
     suspend fun deleteWorkflow(id: String) {
-        dao.deleteWorkflowById(id)
+        withContext(Dispatchers.IO) {
+            dao.deleteWorkflowById(id)
+        }
         Log.i(TAG, "Deleted workflow: $id")
     }
 
     suspend fun logExecution(log: ExecutionLog) {
-        dao.insertLog(log.toEntity())
+        withContext(Dispatchers.IO) {
+            dao.insertLog(log.toEntity())
+        }
     }
 
     suspend fun getLastExecutionLog(): ExecutionLog? {

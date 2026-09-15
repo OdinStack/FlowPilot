@@ -179,31 +179,49 @@ class UITreeParser {
      */
     fun buildUINode(node: AccessibilityNodeInfo, depth: Int = 0): UINode {
         val bounds = Rect()
-        node.getBoundsInScreen(bounds)
+        try {
+            node.getBoundsInScreen(bounds)
+        } catch (e: Exception) {
+            android.util.Log.w("UITreeParser", "Could not get bounds", e)
+        }
 
-        val contextTexts = getContextTexts(node)
+        val contextTexts = try {
+            getContextTexts(node)
+        } catch (e: Exception) {
+            emptyList()
+        }
 
-        return UINode(
-            id = UUID.randomUUID().toString(),
-            className = node.className?.toString() ?: "unknown",
-            text = node.text?.toString(),
-            contentDescription = node.contentDescription?.toString(),
-            resourceId = node.viewIdResourceName,
-            hintText = node.hintText?.toString(),
-            bounds = BoundsRect.fromAndroidRect(bounds),
-            isClickable = node.isClickable,
-            isEnabled = node.isEnabled,
-            isEditable = node.isEditable,
-            isScrollable = node.isScrollable,
-            isSelected = node.isSelected,
-            isCheckable = node.isCheckable,
-            isChecked = node.isChecked,
-            isVisibleToUser = node.isVisibleToUser,
-            isFocused = node.isFocused,
-            isFocusable = node.isFocusable,
-            inputType = if (node.isEditable) node.inputType else null,
-            depth = depth,
-            packageName = node.packageName?.toString() ?: ""
-        )
+        return try {
+            UINode(
+                id = UUID.randomUUID().toString(),
+                className = node.className?.toString() ?: "unknown",
+                text = node.text?.toString(),
+                contentDescription = node.contentDescription?.toString(),
+                resourceId = node.viewIdResourceName,
+                hintText = node.hintText?.toString(),
+                bounds = BoundsRect.fromAndroidRect(bounds),
+                isClickable = node.isClickable,
+                isEnabled = node.isEnabled,
+                isEditable = node.isEditable,
+                isScrollable = node.isScrollable,
+                isSelected = node.isSelected,
+                isCheckable = node.isCheckable,
+                isChecked = node.isChecked,
+                isVisibleToUser = node.isVisibleToUser,
+                isFocused = node.isFocused,
+                isFocusable = node.isFocusable,
+                inputType = if (node.isEditable) node.inputType else null,
+                depth = depth,
+                packageName = node.packageName?.toString() ?: ""
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("UITreeParser", "Failed to build UINode", e)
+            UINode(
+                id = UUID.randomUUID().toString(),
+                className = "unknown",
+                bounds = BoundsRect.fromAndroidRect(bounds),
+                isClickable = true
+            )
+        }
     }
 }

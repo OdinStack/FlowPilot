@@ -99,7 +99,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun submitTextCommand(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch(Dispatchers.Main) {
+            handleVoiceCommand(trimmed)
+        }
+    }
+
     private suspend fun handleVoiceCommand(text: String) {
+        if (!FlowPilotAccessibilityService.isServiceConnected.value) {
+            stateMachine.setError("Accessibility Service is not connected. Please enable FlowPilot in Accessibility Settings first.")
+            viewModelScope.launch(Dispatchers.Main) {
+                voiceManager.speak("Please enable FlowPilot in your phone's Accessibility Settings first.")
+            }
+            return
+        }
+
         stateMachine.setRecognizedText(text)
         stateMachine.transition(SystemMode.PROCESSING, "Interpreting: \"$text\"")
 

@@ -73,7 +73,11 @@ class TeachingCoordinator(
         if (service != null) {
             service.startRecording(null)
         } else {
-            Log.w(TAG, "AccessibilityService not connected yet")
+            Log.e(TAG, "AccessibilityService not connected yet! Cannot record actions.")
+            stateMachine.setError("Accessibility Service not connected. Enable FlowPilot in Android Settings.")
+            _isTeaching.value = false
+            notificationManager.dismissNotification()
+            return
         }
 
         actionCollectionJob?.cancel()

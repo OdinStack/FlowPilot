@@ -19,19 +19,19 @@ interface WorkflowDao {
     suspend fun getAllWorkflowsSync(): List<WorkflowEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertWorkflow(workflow: WorkflowEntity)
+    suspend fun insertWorkflow(workflow: WorkflowEntity): Long
 
     @Delete
-    suspend fun deleteWorkflow(workflow: WorkflowEntity)
+    suspend fun deleteWorkflow(workflow: WorkflowEntity): Int
 
     @Query("DELETE FROM workflows WHERE id = :id")
-    suspend fun deleteWorkflowById(id: String)
+    suspend fun deleteWorkflowById(id: String): Int
 
     @Query("SELECT * FROM execution_logs ORDER BY startedAt DESC LIMIT 10")
     fun getRecentLogs(): Flow<List<ExecutionLogEntity>>
 
     @Insert
-    suspend fun insertLog(log: ExecutionLogEntity)
+    suspend fun insertLog(log: ExecutionLogEntity): Long
 
     @Query("SELECT * FROM execution_logs ORDER BY startedAt DESC LIMIT 1")
     suspend fun getLastLog(): ExecutionLogEntity?

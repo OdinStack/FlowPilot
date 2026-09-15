@@ -24,7 +24,7 @@ class GeminiClient(private val apiKey: String) {
         .build()
 
     private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"
-    private val model = "gemini-2.0-flash"
+    private val model = "gemini-2.5-flash"
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
@@ -93,7 +93,7 @@ class GeminiClient(private val apiKey: String) {
     suspend fun embed(text: String): FloatArray? = withContext(Dispatchers.IO) {
         try {
             val requestBody = buildJsonObject {
-                put("model", "models/text-embedding-004")
+                put("model", "models/gemini-embedding-2")
                 put("content", buildJsonObject {
                     putJsonArray("parts") {
                         addJsonObject { put("text", text) }
@@ -102,7 +102,7 @@ class GeminiClient(private val apiKey: String) {
             }
 
             val request = Request.Builder()
-                .url("https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=$apiKey")
+                .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=$apiKey")
                 .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 

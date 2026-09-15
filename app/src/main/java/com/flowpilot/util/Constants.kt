@@ -1,8 +1,10 @@
 package com.flowpilot.util
 
 object Constants {
-    // Replace with your actual Gemini API key
-    const val GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+    // Loaded securely from local.properties via BuildConfig
+    val GEMINI_API_KEY: String
+        get() = com.flowpilot.BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() }
+            ?: "YOUR_GEMINI_API_KEY_HERE"
     
     // Timing constants
     const val UI_SETTLE_DELAY_MS = 500L
