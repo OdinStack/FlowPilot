@@ -20,18 +20,24 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -45,10 +51,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.flowpilot.accessibility.FlowPilotAccessibilityService
+import com.flowpilot.data.models.Workflow
+import com.flowpilot.engine.SystemMode
 import com.flowpilot.util.openAccessibilitySettings
 import com.flowpilot.voice.VoiceState
 
@@ -63,7 +72,8 @@ fun HomeScreen(
     val isTeaching by viewModel.isTeaching.collectAsState()
     val actionsCount by viewModel.recordedActionsCount.collectAsState()
     val lastSummary by viewModel.lastCapturedSummary.collectAsState()
-    val lastTeachingResult by viewModel.lastTeachingResult.collectAsState()
+    val savedWorkflows by viewModel.savedWorkflows.collectAsState()
+    val lastSynthesized by viewModel.lastSynthesizedWorkflow.collectAsState()
 
     val isListening = voiceState is VoiceState.Listening
 
@@ -84,37 +94,43 @@ fun HomeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         // Service status card
         ServiceStatusCard(isConnected = isServiceConnected)
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Center Area: Teaching Card or Microphone
-        if (isTeaching) {
-            TeachingActiveCard(
-                actionCount = actionsCount,
-                lastAction = lastSummary,
-                onDone = { viewModel.stopTeaching() },
-                onCancel = { viewModel.cancelTeaching() }
-            )
-        } else {
-            MicButton(
-                isListening = isListening,
-                onClick = { viewModel.onMicTapped() }
-            )
+        // Center Area: Teaching Card, Synthesizing Card, or Microphone
+        when {
+            isTeaching -> {
+                TeachingActiveCard(
+                    actionCount = actionsCount,
+                    lastAction = lastSummary,
+                    onDone = { viewModel.stopTeaching() },
+                    onCancel = { viewModel.cancelTeaching() }
+                )
+            }
+            systemState.mode == SystemMode.SYNTHESIZING -> {
+                SynthesizingCard(message = systemState.message)
+            }
+            else -> {
+                MicButton(
+                    isListening = isListening,
+                    onClick = { viewModel.onMicTapped() }
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Dynamic status text
         val displayText = when (val vs = voiceState) {
             is VoiceState.Listening -> "Listening... Speak your command"
-            is VoiceState.Partial -> "“${vs.text}”"
+            is VoiceState.Partial -> "\u201c${vs.text}\u201d"
             is VoiceState.Processing -> "Processing speech..."
-            is VoiceState.Result -> "“${vs.text}”"
-            is VoiceState.Error -> "⚠️ ${vs.message}"
+            is VoiceState.Result -> "\u201c${vs.text}\u201d"
+            is VoiceState.Error -> "\u26a0\ufe0f ${vs.message}"
             is VoiceState.Idle -> systemState.message
         }
 
@@ -127,99 +143,220 @@ fun HomeScreen(
                     else MaterialTheme.colorScheme.onSurface
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Learned flow list or placeholder
-        val result = lastTeachingResult
-        if (result != null) {
-            LearnedFlowCard(
-                result = result,
-                onDismiss = { viewModel.clearLastTeachingResult() },
-                modifier = Modifier.weight(1f, fill = false)
+        // Last synthesized workflow banner
+        lastSynthesized?.let { workflow ->
+            SynthesizedWorkflowBanner(
+                workflow = workflow,
+                onDismiss = { /* Keep it, user might want to see it */ }
             )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // Saved workflows section
+        if (savedWorkflows.isNotEmpty()) {
+            Text(
+                text = "Learned Workflows (${savedWorkflows.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            )
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(savedWorkflows, key = { it.id }) { workflow ->
+                    SavedWorkflowCard(
+                        workflow = workflow,
+                        onDelete = { viewModel.deleteWorkflow(workflow) }
+                    )
+                }
+            }
         } else {
             Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "No learned workflows yet. Tap the mic to teach one!",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Default.School,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "No workflows learned yet",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+                Text(
+                    text = "Tap the mic and tell me what to automate!",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
 
 @Composable
-fun LearnedFlowCard(
-    result: com.flowpilot.engine.TeachingResult,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
-) {
+fun SynthesizingCard(message: String) {
+    val infiniteTransition = rememberInfiniteTransition(label = "synthPulse")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "synthAlpha"
+    )
+
     Card(
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f)
         )
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "\uD83E\uDDE0 AI Analyzing...",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = alpha)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+        }
+    }
+}
+
+@Composable
+fun SynthesizedWorkflowBanner(
+    workflow: Workflow,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "\u2728 Just Learned: ${workflow.name}",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = workflow.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = "${workflow.steps.size} steps \u2022 ${workflow.slots.size} parameters \u2022 ${workflow.targetAppPackage.substringAfterLast('.')}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+            )
+            if (workflow.slots.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Parameters: ${workflow.slots.keys.joinToString(", ")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun SavedWorkflowCard(
+    workflow: Workflow,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = workflow.name.replace("_", " ").replaceFirstChar { it.uppercase() },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = workflow.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row {
                     Text(
-                        text = "✨ Learned Workflow",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
+                        text = "${workflow.steps.size} steps",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    if (workflow.slots.isNotEmpty()) {
+                        Text(
+                            text = " \u2022 ${workflow.slots.size} params",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
                     Text(
-                        text = "“${result.utterance}”",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "App: ${result.targetPackage} • ${result.actions.size} cleaned actions",
+                        text = " \u2022 ${workflow.targetAppPackage.substringAfterLast('.')}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     )
-                }
-
-                OutlinedButton(
-                    onClick = onDismiss,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text("Clear", fontSize = 12.sp)
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            // TODO: Phase 6 — replay button
+            IconButton(onClick = { /* replay - Phase 6 */ }) {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = "Replay",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
 
-            androidx.compose.foundation.lazy.LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(200.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(result.actions.size) { idx ->
-                    val action = result.actions[idx]
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        )
-                    ) {
-                        Text(
-                            text = action.toShortString(),
-                            modifier = Modifier.padding(6.dp),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            lineHeight = 14.sp
-                        )
-                    }
-                }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Delete",
+                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                )
             }
         }
     }
@@ -244,7 +381,7 @@ fun TeachingActiveCard(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "🔴 Teaching in Progress",
+                text = "\uD83D\uDD34 Teaching in Progress",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onErrorContainer
@@ -331,8 +468,8 @@ fun ServiceStatusCard(isConnected: Boolean) {
         colors = CardDefaults.cardColors(containerColor = backgroundColor)
     ) {
         Text(
-            text = if (isConnected) "✅ Accessibility Service connected"
-                   else "❌ Accessibility Service not connected — tap to enable",
+            text = if (isConnected) "\u2705 Accessibility Service connected"
+                   else "\u274c Accessibility Service not connected \u2014 tap to enable",
             modifier = Modifier.padding(16.dp),
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium

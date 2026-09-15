@@ -108,13 +108,13 @@ class TeachingCoordinator(
         val service = FlowPilotAccessibilityService.instance
         val finalActions = service?.stopRecording() ?: rawActions.toList()
 
-        val targetPkg = detectedTargetPackage
-            ?: finalActions
-                .filter { it.type == ActionType.CLICK || it.type == ActionType.TYPE }
-                .map { it.packageName }
-                .filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it) && it != context.packageName }
-                .groupBy { it }
-                .maxByOrNull { it.value.size }?.key
+        val targetPkg = finalActions
+            .filter { it.type == ActionType.CLICK || it.type == ActionType.TYPE }
+            .map { it.packageName }
+            .filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it) && it != context.packageName }
+            .groupBy { it }
+            .maxByOrNull { it.value.size }?.key
+            ?: detectedTargetPackage
             ?: finalActions.firstOrNull {
                 !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) &&
                 it.packageName != context.packageName

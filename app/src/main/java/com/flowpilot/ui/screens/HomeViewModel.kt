@@ -1,8 +1,12 @@
 package com.flowpilot.ui.screens
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.flowpilot.FlowPilotApp
+import com.flowpilot.ai.IntentResult
+import com.flowpilot.data.models.Workflow
 import com.flowpilot.engine.SystemMode
 import com.flowpilot.engine.SystemStateMachine
 import com.flowpilot.engine.TeachingCoordinator
@@ -17,6 +21,12 @@ import kotlinx.coroutines.launch
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private const val TAG = "HomeViewModel"
+    }
+
+    private val app = application as FlowPilotApp
+
     val stateMachine = SystemStateMachine()
     val voiceManager = VoiceManager(application)
     val teachingCoordinator = TeachingCoordinator(application, stateMachine)
@@ -30,17 +40,32 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _lastTeachingResult = MutableStateFlow<TeachingResult?>(null)
     val lastTeachingResult: StateFlow<TeachingResult?> = _lastTeachingResult.asStateFlow()
 
+    private val _savedWorkflows = MutableStateFlow<List<Workflow>>(emptyList())
+    val savedWorkflows: StateFlow<List<Workflow>> = _savedWorkflows.asStateFlow()
+
+    private val _lastSynthesizedWorkflow = MutableStateFlow<Workflow?>(null)
+    val lastSynthesizedWorkflow: StateFlow<Workflow?> = _lastSynthesizedWorkflow.asStateFlow()
+
     fun clearLastTeachingResult() {
         _lastTeachingResult.value = null
     }
 
     init {
         voiceManager.initialize()
+
+        // Observe saved workflows from database
+        viewModelScope.launch(Dispatchers.IO) {
+            app.repository.getAllWorkflows().collect { workflows ->
+                _savedWorkflows.value = workflows
+                Log.d(TAG, "Loaded ${workflows.size} workflows from database")
+            }
+        }
+
+        // When teaching completes, synthesize workflow via Gemini and save to database
         viewModelScope.launch(Dispatchers.Main) {
             teachingCoordinator.teachingResults.collect { result ->
                 _lastTeachingResult.value = result
-                val speechMsg = "I learned ${result.actions.size} actions for ${result.targetPackage.substringAfterLast('.')}. Workflow saved."
-                voiceManager.speak(speechMsg)
+                synthesizeAndSaveWorkflow(result)
             }
         }
     }
@@ -68,13 +93,148 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         teachingCoordinator.cancelTeaching()
     }
 
+    fun deleteWorkflow(workflow: Workflow) {
+        viewModelScope.launch(Dispatchers.IO) {
+            app.repository.deleteWorkflow(workflow.id)
+        }
+    }
+
     private suspend fun handleVoiceCommand(text: String) {
         stateMachine.setRecognizedText(text)
         stateMachine.transition(SystemMode.PROCESSING, "Interpreting: \"$text\"")
 
-        // In Phase 2 & 3: Direct to teaching mode
-        voiceManager.speak("Got it! Open your app and perform the task. Tap Done when finished.")
-        teachingCoordinator.startTeaching(text)
+        val flows = _savedWorkflows.value
+
+        if (flows.isEmpty()) {
+            // No workflows saved yet — go straight to teaching
+            voiceManager.speak("No workflows learned yet. I'll record your demonstration. Show me the steps and tap Done when finished.")
+            teachingCoordinator.startTeaching(text)
+            return
+        }
+
+        // Try to match the command to existing workflows
+        stateMachine.transition(SystemMode.PROCESSING, "Checking known workflows...")
+
+        val intentResult = app.intentProcessor.process(text, flows)
+
+        when (intentResult) {
+            is IntentResult.Matched -> {
+                val flow = intentResult.flow
+                val slots = intentResult.extractedSlots
+                val confidence = intentResult.confidence
+                Log.i(TAG, "Matched flow '${flow.name}' with confidence $confidence. Slots: $slots")
+
+                val slotSummary = if (slots.isNotEmpty()) {
+                    slots.entries.joinToString(", ") { "${it.key}=${it.value}" }
+                } else "no parameters"
+
+                voiceManager.speak("I'll execute ${flow.description} with $slotSummary.")
+                stateMachine.transition(
+                    SystemMode.IDLE,
+                    "Matched: ${flow.name} (${"%.0f".format(confidence * 100)}%). Ready to replay in Phase 6."
+                )
+                // TODO: Phase 6 will add actual replay execution here
+            }
+
+            is IntentResult.NeedsClarification -> {
+                val flow = intentResult.flow
+                val missing = intentResult.missingSlots
+                Log.i(TAG, "Needs clarification for '${flow.name}'. Missing: $missing")
+
+                stateMachine.transition(SystemMode.CLARIFYING, "Missing info for ${flow.name}")
+
+                val question = app.intentProcessor.generateClarificationQuestion(flow, missing.first())
+                voiceManager.speak(question)
+                stateMachine.transition(SystemMode.IDLE, "Asked: $question")
+                // TODO: Listen for answer and re-process
+            }
+
+            is IntentResult.Unknown -> {
+                Log.i(TAG, "No matching flow found. Starting teaching mode.")
+                voiceManager.speak("I don't know how to do that yet. Show me once and I'll learn! Tap Done when finished.")
+                teachingCoordinator.startTeaching(text)
+            }
+
+            is IntentResult.NoFlows -> {
+                voiceManager.speak("No workflows learned yet. Show me the steps and tap Done when finished.")
+                teachingCoordinator.startTeaching(text)
+            }
+
+            is IntentResult.TeachNew -> {
+                voiceManager.speak("Got it! Show me the steps and tap Done when finished.")
+                teachingCoordinator.startTeaching(text)
+            }
+        }
+    }
+
+    private fun synthesizeAndSaveWorkflow(result: TeachingResult) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (result.actions.isEmpty()) {
+                    Log.w(TAG, "Teaching finished with 0 actions")
+                    stateMachine.setError("No actions were captured. Please perform the steps and tap Done.")
+                    viewModelScope.launch(Dispatchers.Main) {
+                        voiceManager.speak("I didn't detect any actions. Please try teaching again.")
+                    }
+                    return@launch
+                }
+
+                if (com.flowpilot.util.Constants.GEMINI_API_KEY.isBlank() ||
+                    com.flowpilot.util.Constants.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE"
+                ) {
+                    Log.w(TAG, "Gemini API key not configured")
+                    stateMachine.setError("Gemini API key missing. Set GEMINI_API_KEY in Constants.kt")
+                    viewModelScope.launch(Dispatchers.Main) {
+                        voiceManager.speak("Captured ${result.actions.size} actions, but Gemini API key is missing in Constants.kt.")
+                    }
+                    return@launch
+                }
+
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${result.actions.size} actions with AI...")
+
+                // Step 1: Synthesize workflow from demonstration using Gemini
+                val workflow = app.workflowSynthesizer.synthesize(result)
+
+                if (workflow == null) {
+                    Log.e(TAG, "Workflow synthesis failed")
+                    stateMachine.setError("Workflow synthesis failed. Please check your API key or internet connection.")
+                    viewModelScope.launch(Dispatchers.Main) {
+                        voiceManager.speak("Sorry, I couldn't understand the workflow. Please try teaching again.")
+                    }
+                    return@launch
+                }
+
+                // Step 2: Compute trigger embedding for fast future matching
+                val embedding = app.flowMatcher.computeTriggerEmbedding(workflow.triggerUtterance)
+                val workflowWithEmbedding = workflow.copy(triggerEmbedding = embedding)
+
+                // Step 3: Save to Room database
+                app.repository.saveWorkflow(workflowWithEmbedding)
+
+                _lastSynthesizedWorkflow.value = workflowWithEmbedding
+
+                Log.i(TAG, "Workflow '${workflow.name}' synthesized and saved. ${workflow.steps.size} steps, ${workflow.slots.size} slots.")
+
+                stateMachine.transition(
+                    SystemMode.IDLE,
+                    "✅ Learned \"${workflow.name}\" — ${workflow.steps.size} steps, ${workflow.slots.size} parameters"
+                )
+
+                viewModelScope.launch(Dispatchers.Main) {
+                    voiceManager.speak(
+                        "I learned the workflow ${workflow.description}. " +
+                        "It has ${workflow.steps.size} steps and ${workflow.slots.size} changeable parameters. " +
+                        "You can now trigger it by saying something similar."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in synthesize and save", e)
+                stateMachine.setError("Error: ${e.message}")
+                viewModelScope.launch(Dispatchers.Main) {
+                    voiceManager.speak("Sorry, something went wrong while learning the workflow.")
+                }
+            }
+        }
     }
 
     override fun onCleared() {

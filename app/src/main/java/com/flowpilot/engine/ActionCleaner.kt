@@ -28,8 +28,9 @@ class ActionCleaner {
     }
 
     private fun List<RecordedAction>.filterByPackage(pkg: String): List<RecordedAction> {
-        if (pkg.isBlank()) return this
-        return filter { it.packageName == pkg }
+        if (pkg.isBlank()) return filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
+        val filtered = filter { it.packageName == pkg }
+        return if (filtered.isNotEmpty()) filtered else filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
     }
 
     private fun List<RecordedAction>.mergeDuplicateClicks(): List<RecordedAction> {
