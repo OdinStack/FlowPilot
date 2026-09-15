@@ -68,6 +68,19 @@ class FlowPilotAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        try {
+            val info = serviceInfo ?: android.accessibilityservice.AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.flags = info.flags or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.notificationTimeout = 50
+            serviceInfo = info
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to configure serviceInfo", e)
+        }
         instance = this
         _isServiceConnected.value = true
         Log.i(TAG, "AccessibilityService connected")
@@ -191,11 +204,40 @@ class FlowPilotAccessibilityService : AccessibilityService() {
 
     // ─── PRIVATE EVENT HANDLERS ──────────────────────────────────────────
 
+    private fun createFallbackNode(
+        event: AccessibilityEvent,
+        isClickable: Boolean = false,
+        isEditable: Boolean = false,
+        isScrollable: Boolean = false
+    ): com.flowpilot.data.models.UINode {
+        val text = event.text?.joinToString("")?.takeIf { it.isNotBlank() }
+        val desc = event.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        val className = event.className?.toString() ?: "android.view.View"
+        return com.flowpilot.data.models.UINode(
+            id = java.util.UUID.randomUUID().toString(),
+            className = className,
+            text = text,
+            contentDescription = desc,
+            bounds = com.flowpilot.data.models.BoundsRect(0, 0, 0, 0),
+            isClickable = isClickable,
+            isEditable = isEditable,
+            isScrollable = isScrollable,
+            packageName = event.packageName?.toString() ?: ""
+        )
+    }
+
     private fun handleClick(event: AccessibilityEvent) {
-        val source = event.source ?: return
         flushPendingText()
 
-        val targetNode = uiTreeParser.buildUINode(source)
+        val source = event.source
+        val targetNode = if (source != null) {
+            val node = uiTreeParser.buildUINode(source)
+            source.recycle()
+            node
+        } else {
+            createFallbackNode(event, isClickable = true)
+        }
+
         val action = RecordedAction(
             index = actionIndex++,
             type = ActionType.CLICK,
@@ -206,17 +248,21 @@ class FlowPilotAccessibilityService : AccessibilityService() {
         )
 
         recordAction(action)
-        source.recycle()
-
-        // Update screen signature after a delay
         scheduleSignatureUpdate()
     }
 
     private fun handleLongClick(event: AccessibilityEvent) {
-        val source = event.source ?: return
         flushPendingText()
 
-        val targetNode = uiTreeParser.buildUINode(source)
+        val source = event.source
+        val targetNode = if (source != null) {
+            val node = uiTreeParser.buildUINode(source)
+            source.recycle()
+            node
+        } else {
+            createFallbackNode(event, isClickable = true)
+        }
+
         val action = RecordedAction(
             index = actionIndex++,
             type = ActionType.LONG_CLICK,
@@ -227,15 +273,19 @@ class FlowPilotAccessibilityService : AccessibilityService() {
         )
 
         recordAction(action)
-        source.recycle()
         scheduleSignatureUpdate()
     }
 
     private fun handleTextChanged(event: AccessibilityEvent) {
-        val source = event.source ?: return
         val newText = event.text?.joinToString("") ?: ""
-
-        val targetNode = uiTreeParser.buildUINode(source)
+        val source = event.source
+        val targetNode = if (source != null) {
+            val node = uiTreeParser.buildUINode(source)
+            source.recycle()
+            node
+        } else {
+            createFallbackNode(event, isEditable = true)
+        }
 
         // Debounce: update the pending text rather than recording every keystroke
         pendingTextInput = PendingText(
@@ -244,16 +294,20 @@ class FlowPilotAccessibilityService : AccessibilityService() {
             timestamp = System.currentTimeMillis(),
             packageName = event.packageName?.toString() ?: ""
         )
-
-        source.recycle()
     }
 
     private fun handleScroll(event: AccessibilityEvent) {
-        val source = event.source ?: return
-
         val direction = if (event.scrollY > 0 || event.fromIndex < event.toIndex) "DOWN" else "UP"
 
-        val targetNode = uiTreeParser.buildUINode(source)
+        val source = event.source
+        val targetNode = if (source != null) {
+            val node = uiTreeParser.buildUINode(source)
+            source.recycle()
+            node
+        } else {
+            createFallbackNode(event, isScrollable = true)
+        }
+
         val action = RecordedAction(
             index = actionIndex++,
             type = ActionType.SCROLL,
@@ -265,7 +319,6 @@ class FlowPilotAccessibilityService : AccessibilityService() {
         )
 
         recordAction(action)
-        source.recycle()
         scheduleSignatureUpdate()
     }
 
@@ -290,9 +343,15 @@ class FlowPilotAccessibilityService : AccessibilityService() {
     }
 
     private fun handleSelection(event: AccessibilityEvent) {
-        val source = event.source ?: return
+        val source = event.source
+        val targetNode = if (source != null) {
+            val node = uiTreeParser.buildUINode(source)
+            source.recycle()
+            node
+        } else {
+            createFallbackNode(event)
+        }
 
-        val targetNode = uiTreeParser.buildUINode(source)
         val action = RecordedAction(
             index = actionIndex++,
             type = ActionType.SELECT,
@@ -302,7 +361,6 @@ class FlowPilotAccessibilityService : AccessibilityService() {
         )
 
         recordAction(action)
-        source.recycle()
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────
