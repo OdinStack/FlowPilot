@@ -24,7 +24,7 @@ class GeminiClient(private val apiKey: String) {
         .build()
 
     private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"
-    private val model = "gemini-2.5-flash"
+    private val model = "gemini-3.6-flash"
     private val json = Json { ignoreUnknownKeys = true }
 
     /**

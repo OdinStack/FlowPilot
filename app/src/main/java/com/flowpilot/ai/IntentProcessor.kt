@@ -234,8 +234,13 @@ Just return the question text.
 
     private fun parseLLMMatchResult(jsonStr: String, flows: List<Workflow>): IntentResult {
         return try {
+            val cleanJson = jsonStr.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
             val json = Json { ignoreUnknownKeys = true; isLenient = true }
-            val obj = json.parseToJsonElement(jsonStr).jsonObject
+            val obj = json.parseToJsonElement(cleanJson).jsonObject
 
             val matched = obj["matched"]?.jsonPrimitive?.booleanOrNull ?: false
             if (!matched) return IntentResult.Unknown
@@ -267,8 +272,13 @@ Just return the question text.
 
     private fun parseSlotResponse(jsonStr: String): Map<String, String> {
         return try {
+            val cleanJson = jsonStr.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
             val json = Json { ignoreUnknownKeys = true; isLenient = true }
-            val obj = json.parseToJsonElement(jsonStr).jsonObject
+            val obj = json.parseToJsonElement(cleanJson).jsonObject
             val slotsObj = obj["slots"]?.jsonObject ?: return emptyMap()
             val result = mutableMapOf<String, String>()
             slotsObj.forEach { (key, value) ->

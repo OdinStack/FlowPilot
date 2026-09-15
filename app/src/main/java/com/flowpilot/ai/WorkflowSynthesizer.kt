@@ -136,8 +136,13 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
 
     private fun parseWorkflowFromJson(jsonStr: String, fallbackPackage: String): Workflow? {
         return try {
+            val cleanJson = jsonStr.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
             val json = Json { ignoreUnknownKeys = true; isLenient = true }
-            val obj = json.parseToJsonElement(jsonStr).jsonObject
+            val obj = json.parseToJsonElement(cleanJson).jsonObject
 
             val flowName = obj["flow_name"]?.jsonPrimitive?.contentOrNull ?: "unnamed_flow"
             val description = obj["description"]?.jsonPrimitive?.contentOrNull ?: ""
