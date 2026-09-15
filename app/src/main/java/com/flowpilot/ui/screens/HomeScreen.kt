@@ -47,6 +47,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -168,7 +169,8 @@ fun HomeScreen(
         lastSynthesized?.let { workflow ->
             SynthesizedWorkflowBanner(
                 workflow = workflow,
-                onDismiss = { /* Keep it, user might want to see it */ }
+                onDismiss = { /* Keep it, user might want to see it */ },
+                onReplay = { viewModel.replayWorkflow(workflow) }
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -191,7 +193,8 @@ fun HomeScreen(
                 items(savedWorkflows, key = { it.id }) { workflow ->
                     SavedWorkflowCard(
                         workflow = workflow,
-                        onDelete = { viewModel.deleteWorkflow(workflow) }
+                        onDelete = { viewModel.deleteWorkflow(workflow) },
+                        onReplay = { viewModel.replayWorkflow(workflow) }
                     )
                 }
             }
@@ -268,7 +271,8 @@ fun SynthesizingCard(message: String) {
 @Composable
 fun SynthesizedWorkflowBanner(
     workflow: Workflow,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onReplay: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -303,6 +307,21 @@ fun SynthesizedWorkflowBanner(
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
                 )
             }
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onReplay) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Replay",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Replay")
+                }
+            }
         }
     }
 }
@@ -310,7 +329,8 @@ fun SynthesizedWorkflowBanner(
 @Composable
 fun SavedWorkflowCard(
     workflow: Workflow,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onReplay: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -361,8 +381,7 @@ fun SavedWorkflowCard(
                 }
             }
 
-            // TODO: Phase 6 — replay button
-            IconButton(onClick = { /* replay - Phase 6 */ }) {
+            IconButton(onClick = onReplay) {
                 Icon(
                     Icons.Default.PlayArrow,
                     contentDescription = "Replay",
