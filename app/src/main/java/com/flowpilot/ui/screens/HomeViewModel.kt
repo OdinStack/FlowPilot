@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.flowpilot.FlowPilotApp
+import com.flowpilot.accessibility.FlowPilotAccessibilityService
 import com.flowpilot.ai.IntentResult
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.engine.SystemMode
