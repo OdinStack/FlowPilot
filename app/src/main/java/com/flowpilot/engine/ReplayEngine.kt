@@ -104,11 +104,19 @@ class ReplayEngine(
             val isForeground = currentPkg.contains(token, ignoreCase = true) || currentPkg.equals(targetPkg, ignoreCase = true)
 
             if (!isForeground) {
-                Log.i(TAG, "Target app '$targetPkg' is not in foreground (current: '$currentPkg'). Launching target app...")
+                Log.w(TAG, "Target app '$targetPkg' is not in foreground (current: '$currentPkg'). Launching target app...")
                 stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
                 val launched = actionExecutor.openApp(targetPkg)
                 if (launched) {
-                    delay(2500) // Allow target app window to stabilize
+                    for (i in 1..10) {
+                        delay(500)
+                        val activePkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
+                        if (activePkg.contains(token, ignoreCase = true) || activePkg.equals(targetPkg, ignoreCase = true)) {
+                            Log.w(TAG, "Target app '$targetPkg' confirmed in foreground (active: '$activePkg')")
+                            break
+                        }
+                    }
+                    delay(1000)
                 } else {
                     Log.w(TAG, "Failed to launch target app: $targetPkg")
                 }
@@ -221,7 +229,7 @@ class ReplayEngine(
         )
 
         return when (step.type) {
-            StepType.OPEN_APP -> executeOpenApp(actionExecutor, workflow, step)
+            StepType.OPEN_APP -> executeOpenApp(service, actionExecutor, workflow, step)
             StepType.CLICK -> executeClick(service, actionExecutor, step, slotValues)
             StepType.TYPE -> executeType(service, actionExecutor, step, slotValues)
             StepType.SCROLL -> executeScroll(service, actionExecutor, step)
@@ -232,6 +240,7 @@ class ReplayEngine(
     }
 
     private suspend fun executeOpenApp(
+        service: FlowPilotAccessibilityService,
         actionExecutor: ActionExecutor,
         workflow: Workflow,
         step: WorkflowStep
@@ -241,9 +250,22 @@ class ReplayEngine(
             ?: workflow.targetAppPackage.takeIf { it.isNotBlank() }
             ?: return StepResult(step.index, false, "OPEN_APP", "No target package specified", 0)
 
-        Log.d(TAG, "Opening target app: $targetPkg")
+        Log.w(TAG, "Opening target app: $targetPkg")
         val success = actionExecutor.openApp(targetPkg)
-        delay(2000) // Allow target app to launch and stabilize
+        val token = if (targetPkg.contains('.')) {
+            targetPkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: targetPkg
+        } else {
+            targetPkg
+        }
+        for (i in 1..10) {
+            delay(500)
+            val activePkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
+            if (activePkg.contains(token, ignoreCase = true) || activePkg.equals(targetPkg, ignoreCase = true)) {
+                Log.w(TAG, "Target app '$targetPkg' confirmed in foreground (active: '$activePkg')")
+                break
+            }
+        }
+        delay(1000)
         return StepResult(step.index, success, "OPEN_APP", "Opened $targetPkg", 0)
     }
 

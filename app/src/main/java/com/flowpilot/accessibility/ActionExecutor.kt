@@ -139,7 +139,7 @@ class ActionExecutor(private val service: AccessibilityService) {
      * Open an app by its package name.
      */
     suspend fun openApp(packageName: String): Boolean {
-        Log.d(TAG, "Opening app: $packageName")
+        Log.w(TAG, "Opening app: $packageName")
         return try {
             val pm = service.packageManager
             var intent = pm.getLaunchIntentForPackage(packageName)
@@ -157,14 +157,43 @@ class ActionExecutor(private val service: AccessibilityService) {
                     it.packageName.contains(token, ignoreCase = true)
                 }
                 if (candidate != null) {
-                    Log.i(TAG, "Resolved '$packageName' (token '$token') to installed package '${candidate.packageName}'")
+                    Log.w(TAG, "Resolved '$packageName' (token '$token') to installed package '${candidate.packageName}'")
                     intent = pm.getLaunchIntentForPackage(candidate.packageName)
                 }
             }
 
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                service.startActivity(intent)
+
+                // 1. Try launching via current foreground Activity (bypasses all background activity restrictions)
+                val currentActivity = com.flowpilot.FlowPilotApp.currentActivity
+                if (currentActivity != null) {
+                    Log.w(TAG, "Launching $packageName from foreground activity: ${currentActivity.localClassName}")
+                    currentActivity.startActivity(intent)
+                } else {
+                    // 2. Fallback: Launch via PendingIntent with Android 14 BAL exemption
+                    try {
+                        val options = android.app.ActivityOptions.makeBasic()
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            options.setPendingIntentBackgroundActivityStartMode(
+                                android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                            )
+                        }
+                        val pi = android.app.PendingIntent.getActivity(
+                            service,
+                            0,
+                            intent,
+                            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+                            options.toBundle()
+                        )
+                        pi.send()
+                        Log.w(TAG, "Sent PendingIntent with BAL allowance for $packageName")
+                    } catch (pe: Exception) {
+                        Log.w(TAG, "PendingIntent launch failed, falling back to service.startActivity", pe)
+                        service.startActivity(intent)
+                    }
+                }
+
                 delay(2000) // Wait for app to open
                 true
             } else {
