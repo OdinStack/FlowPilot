@@ -8,6 +8,7 @@ import com.flowpilot.FlowPilotApp
 import com.flowpilot.accessibility.FlowPilotAccessibilityService
 import com.flowpilot.ai.IntentResult
 import com.flowpilot.data.models.Workflow
+import com.flowpilot.engine.ReplayEngine
 import com.flowpilot.engine.SystemMode
 import com.flowpilot.engine.SystemStateMachine
 import com.flowpilot.engine.TeachingCoordinator
@@ -31,6 +32,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val stateMachine = SystemStateMachine()
     val voiceManager = VoiceManager(application)
     val teachingCoordinator = TeachingCoordinator(application, stateMachine)
+    val replayEngine = ReplayEngine(stateMachine = stateMachine)
 
     val systemState = stateMachine.state
     val voiceState = voiceManager.voiceState
@@ -100,6 +102,32 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun replayWorkflow(workflow: Workflow, slotValues: Map<String, String> = emptyMap()) {
+        val service = FlowPilotAccessibilityService.instance
+        if (service == null) {
+            stateMachine.setError("Accessibility Service not connected. Please enable FlowPilot in Accessibility Settings.")
+            viewModelScope.launch(Dispatchers.Main) {
+                voiceManager.speak("Please enable FlowPilot in Accessibility Settings first.")
+            }
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = replayEngine.execute(workflow, slotValues)
+            viewModelScope.launch(Dispatchers.Main) {
+                if (result.success) {
+                    if (result.stopReason != null && result.stopReason.contains("Credential", ignoreCase = true)) {
+                        voiceManager.speak("I've stopped at the security screen. Please complete this step yourself.")
+                    } else {
+                        voiceManager.speak("Finished executing ${workflow.name} successfully.")
+                    }
+                } else {
+                    voiceManager.speak("Replay stopped: ${result.stopReason ?: "an error occurred"}")
+                }
+            }
+        }
+    }
+
     fun submitTextCommand(text: String) {
         val trimmed = text.trim()
         if (trimmed.isBlank()) return
@@ -145,12 +173,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     slots.entries.joinToString(", ") { "${it.key}=${it.value}" }
                 } else "no parameters"
 
-                voiceManager.speak("I'll execute ${flow.description} with $slotSummary.")
-                stateMachine.transition(
-                    SystemMode.IDLE,
-                    "Matched: ${flow.name} (${"%.0f".format(confidence * 100)}%). Ready to replay in Phase 6."
-                )
-                // TODO: Phase 6 will add actual replay execution here
+                voiceManager.speak("Executing ${flow.name}.")
+                replayWorkflow(flow, slots)
             }
 
             is IntentResult.NeedsClarification -> {

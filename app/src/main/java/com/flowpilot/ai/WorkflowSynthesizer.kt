@@ -63,6 +63,8 @@ OUTPUT FORMAT (JSON):
 
 IMPORTANT:
 - Use {slot_name} syntax for parameter values in step targets and values
+- When an input value (such as a multi-digit number '10' or entered text) is a slot parameter, represent it as a SINGLE step with target.text = "{slot_name}" (or value = "{slot_name}"). DO NOT split it into separate steps for individual digits or characters. The replay engine handles sequential multi-digit typing automatically.
+- For parameterized steps (where target.text or value uses {slot_name}), DO NOT include a digit-specific or literal-specific resource_id (like digit_5); omit resource_id so the parameter value dynamically resolves.
 - For buttons that appear multiple times, ALWAYS include context_text_contains to disambiguate
 - Mark the last step as is_credential_boundary: true if it leads to payment/login
 - Don't include app-opening as a step if the user was already in the app
