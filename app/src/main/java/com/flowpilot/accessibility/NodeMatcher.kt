@@ -90,13 +90,31 @@ class NodeMatcher {
             return result
         }
 
+        val resolvedText = spec.text?.resolveSlot()
+        var resolvedResId = spec.resourceId?.resolveSlot()
+
+        // If the text was parameterized and changed, adjust or strip any digit-specific resourceId
+        // so a hardcoded digit_5 doesn't lock onto button 5 when the slot value is 10 or 7.
+        if (spec.text != null && spec.text.contains('{') && resolvedText != null) {
+            val oldId = resolvedResId ?: ""
+            if (oldId.contains("digit_") || oldId.contains("btn_")) {
+                if (resolvedText.length == 1 && resolvedText[0].isDigit()) {
+                    resolvedResId = oldId.replace(Regex("digit_\\d"), "digit_${resolvedText}")
+                        .replace(Regex("btn_\\d"), "btn_${resolvedText}")
+                } else {
+                    // Multi-digit or non-digit: clear resourceId so sequential keypad or text matching takes over
+                    resolvedResId = null
+                }
+            }
+        }
+
         return spec.copy(
-            text = spec.text?.resolveSlot(),
+            text = resolvedText,
             textContains = spec.textContains?.resolveSlot(),
             contentDescription = spec.contentDescription?.resolveSlot(),
             contextTextContains = spec.contextTextContains?.resolveSlot(),
             hintText = spec.hintText?.resolveSlot(),
-            resourceId = spec.resourceId?.resolveSlot(),
+            resourceId = resolvedResId,
             semantic = spec.semantic?.resolveSlot()
         )
     }
@@ -117,12 +135,19 @@ class NodeMatcher {
         val rawNodeId = try { node.viewIdResourceName ?: "" } catch (e: Exception) { "" }
         val nodeResId = rawNodeId.substringAfterLast('/')
 
-        // Fast-path exact resource ID match
+        // Fast-path exact resource ID match (ONLY when spec.text is null or does not conflict with node text)
         if (spec.resourceId != null) {
             val specId = spec.resourceId
-            if (rawNodeId.equals(specId, ignoreCase = true) ||
-                (specId.isNotEmpty() && rawNodeId.endsWith("/" + specId.substringAfterLast('/')))) {
-                return if (node.isClickable) 0.95f else 0.85f
+            val idMatches = rawNodeId.equals(specId, ignoreCase = true) ||
+                (specId.isNotEmpty() && rawNodeId.endsWith("/" + specId.substringAfterLast('/')))
+            if (idMatches) {
+                val textConsistent = spec.text == null ||
+                    nodeText.isBlank() ||
+                    matchesSymbolOrSynonym(spec.text, nodeText) ||
+                    matchesSymbolOrSynonym(spec.text, nodeDesc)
+                if (textConsistent) {
+                    return if (node.isClickable) 0.95f else 0.85f
+                }
             }
         }
 
