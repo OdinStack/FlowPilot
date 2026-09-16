@@ -59,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -136,8 +137,7 @@ fun HomeScreen(
                 CommandInputField(
                     onSendCommand = { command ->
                         viewModel.submitTextCommand(command)
-                    },
-                    enabled = isServiceConnected
+                    }
                 )
             }
         }
@@ -567,6 +567,16 @@ fun CommandInputField(
     enabled: Boolean = true
 ) {
     var text by remember { mutableStateOf("") }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun submit() {
+        val cmd = text.trim()
+        if (cmd.isNotBlank()) {
+            onSendCommand(cmd)
+            text = ""
+            keyboardController?.hide()
+        }
+    }
 
     Row(
         modifier = modifier
@@ -591,13 +601,7 @@ fun CommandInputField(
             trailingIcon = {
                 if (text.isNotBlank()) {
                     IconButton(
-                        onClick = {
-                            val cmd = text.trim()
-                            if (cmd.isNotBlank()) {
-                                onSendCommand(cmd)
-                                text = ""
-                            }
-                        },
+                        onClick = { submit() },
                         enabled = enabled
                     ) {
                         Icon(
@@ -610,13 +614,7 @@ fun CommandInputField(
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(
-                onSend = {
-                    val cmd = text.trim()
-                    if (cmd.isNotBlank()) {
-                        onSendCommand(cmd)
-                        text = ""
-                    }
-                }
+                onSend = { submit() }
             )
         )
     }

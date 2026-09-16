@@ -82,8 +82,7 @@ class NodeMatcher {
     private fun resolveSlots(spec: TargetSpec, slots: Map<String, String>): TargetSpec {
         if (slots.isEmpty()) return spec
 
-        fun String?.resolveSlot(): String? {
-            if (this == null) return null
+        fun String.resolveSlot(): String {
             var result = this
             for ((key, value) in slots) {
                 result = result.replace("{$key}", value, ignoreCase = true)
@@ -92,10 +91,10 @@ class NodeMatcher {
         }
 
         return spec.copy(
-            text = spec.text.resolveSlot(),
-            textContains = spec.textContains.resolveSlot(),
-            contentDescription = spec.contentDescription.resolveSlot(),
-            contextTextContains = spec.contextTextContains.resolveSlot()
+            text = spec.text?.resolveSlot(),
+            textContains = spec.textContains?.resolveSlot(),
+            contentDescription = spec.contentDescription?.resolveSlot(),
+            contextTextContains = spec.contextTextContains?.resolveSlot()
         )
     }
 
