@@ -44,11 +44,11 @@ class NodeMatcher {
             }
         }.sortedByDescending { it.score }
 
-        val best = scored.firstOrNull()?.takeIf { it.score >= Constants.NODE_MATCH_THRESHOLD }
+        val best = scored.firstOrNull()?.takeIf { it.score >= 0.45f }
         if (best != null) {
             Log.d(TAG, "Matched best node: score=${best.score}, details=${best.matchDetails}")
         } else {
-            Log.d(TAG, "No node matched threshold (${Constants.NODE_MATCH_THRESHOLD}) for spec: $resolvedSpec")
+            Log.d(TAG, "No node matched threshold (0.45) for spec: $resolvedSpec")
         }
         return best
     }
@@ -109,6 +109,26 @@ class NodeMatcher {
             return 0f
         }
 
+        val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
+        val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
+        val nodeResId = try { node.viewIdResourceName?.substringAfterLast('/') ?: "" } catch (e: Exception) { "" }
+
+        // Fast-path direct text / contentDescription / symbol match for buttons and controls
+        if (spec.text != null) {
+            if (matchesSymbolOrSynonym(spec.text, nodeText) ||
+                matchesSymbolOrSynonym(spec.text, nodeDesc) ||
+                matchesSymbolOrSynonym(spec.text, nodeResId)) {
+                return if (node.isClickable) 0.95f else 0.85f
+            }
+        }
+        if (spec.contentDescription != null) {
+            if (matchesSymbolOrSynonym(spec.contentDescription, nodeDesc) ||
+                matchesSymbolOrSynonym(spec.contentDescription, nodeText) ||
+                matchesSymbolOrSynonym(spec.contentDescription, nodeResId)) {
+                return if (node.isClickable) 0.92f else 0.80f
+            }
+        }
+
         var totalWeight = 0f
         var score = 0f
 
@@ -120,25 +140,24 @@ class NodeMatcher {
             if (nodeId.equals(specId, ignoreCase = true)) {
                 score += 0.25f
             } else if (specId.isNotEmpty() && nodeId.contains(specId.substringAfterLast('/'), ignoreCase = true)) {
-                score += 0.15f
+                score += 0.20f
             }
         }
 
-        // 2. Text match (weight: 0.30)
+        // 2. Text match (weight: 0.35)
         if (spec.text != null || spec.textContains != null) {
-            totalWeight += 0.30f
-            val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
+            totalWeight += 0.35f
 
             if (spec.text != null) {
                 when {
-                    nodeText.equals(spec.text, ignoreCase = true) -> score += 0.30f
+                    nodeText.equals(spec.text, ignoreCase = true) -> score += 0.35f
                     nodeText.contains(spec.text, ignoreCase = true) -> score += 0.25f
                     nodeText.fuzzyContains(spec.text) -> score += 0.15f
                 }
             }
             if (spec.textContains != null) {
                 when {
-                    nodeText.contains(spec.textContains, ignoreCase = true) -> score += 0.30f
+                    nodeText.contains(spec.textContains, ignoreCase = true) -> score += 0.35f
                     nodeText.fuzzyContains(spec.textContains) -> score += 0.15f
                 }
             }
@@ -250,6 +269,50 @@ class NodeMatcher {
             Log.w(TAG, "Error collecting context texts", e)
         }
         return texts.distinct()
+    }
+
+    /**
+     * Match a spec string against a candidate string, handling math symbols, synonyms,
+     * and OEM-specific naming (e.g. "+" vs "Add" vs "op_add").
+     */
+    private fun matchesSymbolOrSynonym(specText: String, candidate: String): Boolean {
+        if (candidate.isBlank() || specText.isBlank()) return false
+        if (candidate.equals(specText, ignoreCase = true)) return true
+
+        val s = specText.trim().lowercase()
+        val c = candidate.trim().lowercase()
+
+        if (s == c) return true
+
+        return when (s) {
+            "+", "plus", "add", "addition", "op_add" ->
+                c in listOf("+", "plus", "add", "addition", "op_add") || c.contains("add") || c.contains("plus")
+            "-", "−", "minus", "sub", "subtract", "subtraction", "op_sub" ->
+                c in listOf("-", "−", "minus", "sub", "subtract", "subtraction", "op_sub") || c.contains("sub") || c.contains("minus")
+            "*", "×", "x", "mul", "multiply", "multiplication", "times", "op_mul" ->
+                c in listOf("*", "×", "x", "mul", "multiply", "multiplication", "times", "op_mul") || c.contains("mul") || c.contains("times")
+            "/", "÷", "div", "divide", "division", "op_div" ->
+                c in listOf("/", "÷", "div", "divide", "division", "op_div") || c.contains("div")
+            "=", "equals", "equal", "result", "calculate", "eq" ->
+                c in listOf("=", "equals", "equal", "result", "calculate", "eq") || c.contains("equal")
+            ".", "point", "dot", "decimal", "dec_point" ->
+                c in listOf(".", "point", "dot", "decimal", "dec_point") || c.contains("point") || c.contains("dot")
+            "c", "ac", "clear", "all clear", "clr" ->
+                c in listOf("c", "ac", "clear", "all clear", "clr") || c.contains("clear")
+            "del", "delete", "backspace" ->
+                c in listOf("del", "delete", "backspace") || c.contains("del") || c.contains("backspace")
+            "0", "zero", "digit_0" -> c in listOf("0", "zero", "digit_0")
+            "1", "one", "digit_1" -> c in listOf("1", "one", "digit_1")
+            "2", "two", "digit_2" -> c in listOf("2", "two", "digit_2")
+            "3", "three", "digit_3" -> c in listOf("3", "three", "digit_3")
+            "4", "four", "digit_4" -> c in listOf("4", "four", "digit_4")
+            "5", "five", "digit_5" -> c in listOf("5", "five", "digit_5")
+            "6", "six", "digit_6" -> c in listOf("6", "six", "digit_6")
+            "7", "seven", "digit_7" -> c in listOf("7", "seven", "digit_7")
+            "8", "eight", "digit_8" -> c in listOf("8", "eight", "digit_8")
+            "9", "nine", "digit_9" -> c in listOf("9", "nine", "digit_9")
+            else -> false
+        }
     }
 
     /**

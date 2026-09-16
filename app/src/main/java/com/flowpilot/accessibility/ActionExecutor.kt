@@ -141,14 +141,34 @@ class ActionExecutor(private val service: AccessibilityService) {
     suspend fun openApp(packageName: String): Boolean {
         Log.d(TAG, "Opening app: $packageName")
         return try {
-            val intent = service.packageManager.getLaunchIntentForPackage(packageName)
+            val pm = service.packageManager
+            var intent = pm.getLaunchIntentForPackage(packageName)
+
+            if (intent == null) {
+                val cleanName = packageName.trim().lowercase()
+                val token = if (cleanName.contains('.')) {
+                    cleanName.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: cleanName
+                } else {
+                    cleanName
+                }
+
+                val installed = pm.getInstalledApplications(0)
+                val candidate = installed.firstOrNull {
+                    it.packageName.contains(token, ignoreCase = true)
+                }
+                if (candidate != null) {
+                    Log.i(TAG, "Resolved '$packageName' (token '$token') to installed package '${candidate.packageName}'")
+                    intent = pm.getLaunchIntentForPackage(candidate.packageName)
+                }
+            }
+
             if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 service.startActivity(intent)
                 delay(2000) // Wait for app to open
                 true
             } else {
-                Log.e(TAG, "No launch intent for package: $packageName")
+                Log.e(TAG, "No launch intent found for: $packageName")
                 false
             }
         } catch (e: Exception) {

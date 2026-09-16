@@ -79,8 +79,40 @@ class ReplayEngine(
         val actionExecutor = service.actionExecutor
         val stepResults = mutableListOf<StepResult>()
 
-        Log.i(TAG, "Beginning replay of '${workflow.name}' (${workflow.steps.size} steps)")
+        // 1. Resolve effective slot values (workflow default values + runtime user slots)
+        val effectiveSlots = mutableMapOf<String, String>()
+        for ((name, slot) in workflow.slots) {
+            slot.defaultValue?.takeIf { it.isNotBlank() }?.let { effectiveSlots[name] = it }
+        }
+        effectiveSlots.putAll(slotValues)
+
+        Log.i(TAG, "Beginning replay of '${workflow.name}' (${workflow.steps.size} steps). Effective slots: $effectiveSlots")
         stateMachine.transition(SystemMode.REPLAYING, "Starting \"${workflow.name}\"...")
+
+        // 2. Ensure target app is launched and active in foreground before starting steps
+        val targetPkg = workflow.targetAppPackage.trim()
+        val firstStepIsOpenApp = workflow.steps.firstOrNull()?.type == StepType.OPEN_APP
+
+        if (targetPkg.isNotBlank() && !firstStepIsOpenApp) {
+            val currentPkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
+            val token = if (targetPkg.contains('.')) {
+                targetPkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: targetPkg
+            } else {
+                targetPkg
+            }
+            val isForeground = currentPkg.contains(token, ignoreCase = true) || currentPkg.equals(targetPkg, ignoreCase = true)
+
+            if (!isForeground) {
+                Log.i(TAG, "Target app '$targetPkg' is not in foreground (current: '$currentPkg'). Launching target app...")
+                stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
+                val launched = actionExecutor.openApp(targetPkg)
+                if (launched) {
+                    delay(2500) // Allow target app window to stabilize
+                } else {
+                    Log.w(TAG, "Failed to launch target app: $targetPkg")
+                }
+            }
+        }
 
         for (step in workflow.steps) {
             val stepDesc = step.description.ifBlank { "${step.type.name} step ${step.index + 1}" }
@@ -140,7 +172,7 @@ class ReplayEngine(
             }
 
             // ─── EXECUTE STEP ───
-            val stepResult = executeStep(service, actionExecutor, workflow, step, slotValues)
+            val stepResult = executeStep(service, actionExecutor, workflow, step, effectiveSlots)
             val duration = System.currentTimeMillis() - startTime
             val finalStepResult = stepResult.copy(durationMs = duration)
             stepResults.add(finalStepResult)
@@ -220,9 +252,24 @@ class ReplayEngine(
         step: WorkflowStep,
         slots: Map<String, String>
     ): StepResult {
-        return findAndAct(service, step, slots, "CLICK") { node ->
+        // 1. Try single element direct click
+        val directResult = findAndAct(service, step, slots, "CLICK") { node ->
             actionExecutor.click(node)
         }
+        if (directResult.success) {
+            return directResult
+        }
+
+        // 2. Fallback: if element not found, check if it's a multi-character keypad entry (e.g. "10", "42")
+        val resolved = resolveTargetText(step, slots)
+        if (resolved != null) {
+            val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, resolved)
+            if (keypadResult != null) {
+                return keypadResult
+            }
+        }
+
+        return directResult
     }
 
     private suspend fun executeType(
@@ -236,9 +283,20 @@ class ReplayEngine(
             textToType = textToType.replace("{$key}", value, ignoreCase = true)
         }
 
-        return findAndAct(service, step, slots, "TYPE") { node ->
+        val result = findAndAct(service, step, slots, "TYPE") { node ->
             actionExecutor.setText(node, textToType)
         }
+        if (result.success) {
+            return result
+        }
+
+        // Fallback for non-editable fields (e.g. calculator display): try sequential keypad clicks
+        val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, textToType)
+        if (keypadResult != null) {
+            return keypadResult
+        }
+
+        return result
     }
 
     private suspend fun executeScroll(
@@ -287,6 +345,14 @@ class ReplayEngine(
         }
 
         if (match == null) {
+            val resolved = resolveTargetText(step, slots)
+            if (resolved != null) {
+                val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, resolved)
+                if (keypadResult != null) {
+                    return keypadResult
+                }
+            }
+
             val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: "target element"
             return StepResult(step.index, false, "FIND_AND_CLICK", "Could not locate: $targetDesc", 0)
         }
@@ -397,5 +463,72 @@ class ReplayEngine(
             return null
         }
         return search(root, 0)
+    }
+
+    private fun resolveTargetText(step: WorkflowStep, slots: Map<String, String>): String? {
+        val raw = step.target.text ?: step.value ?: step.target.textContains ?: step.target.semantic
+        if (raw.isNullOrBlank()) return null
+        var resolved = raw
+        for ((k, v) in slots) {
+            resolved = resolved.replace("{$k}", v, ignoreCase = true)
+        }
+        return resolved.trim()
+    }
+
+    private suspend fun trySequentialKeypadClick(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor,
+        step: WorkflowStep,
+        resolvedText: String
+    ): StepResult? {
+        val clean = resolvedText.trim()
+        if (clean.length <= 1 || !clean.matches(Regex("^[0-9.+-/*×÷=]+$"))) {
+            return null
+        }
+
+        Log.i(TAG, "Attempting sequential keypad click for '$clean' on step ${step.index}")
+        var allClicked = true
+
+        for ((idx, char) in clean.withIndex()) {
+            val charStr = char.toString()
+            val digitSpec = TargetSpec(text = charStr)
+
+            var charClicked = false
+            for (attempt in 1..Constants.MAX_RETRY_ATTEMPTS) {
+                val root = service.rootInActiveWindow ?: run {
+                    delay(300)
+                    continue
+                }
+
+                val match = nodeMatcher.findBestMatch(root, digitSpec, emptyMap())
+                if (match != null) {
+                    val clicked = actionExecutor.click(match.node)
+                    if (clicked) {
+                        charClicked = true
+                        delay(350) // Delay between keypad taps
+                        break
+                    }
+                }
+                delay(300)
+            }
+
+            if (!charClicked) {
+                Log.w(TAG, "Sequential keypad click failed at char '$charStr' (index $idx) of '$clean'")
+                allClicked = false
+                break
+            }
+        }
+
+        return if (allClicked) {
+            StepResult(
+                step.index,
+                true,
+                "CLICK",
+                "Sequential keypad input for '$clean' succeeded",
+                0
+            )
+        } else {
+            null
+        }
     }
 }
