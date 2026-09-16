@@ -9,6 +9,7 @@ import com.flowpilot.accessibility.SafetyDetector
 import com.flowpilot.accessibility.ScreenAnalyzer
 import com.flowpilot.ai.GeminiClient
 import com.flowpilot.data.models.StepType
+import com.flowpilot.data.models.TargetSpec
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.data.models.WorkflowStep
 import com.flowpilot.util.Constants
@@ -468,7 +469,7 @@ class ReplayEngine(
     private fun resolveTargetText(step: WorkflowStep, slots: Map<String, String>): String? {
         val raw = step.target.text ?: step.value ?: step.target.textContains ?: step.target.semantic
         if (raw.isNullOrBlank()) return null
-        var resolved = raw
+        var resolved: String = raw
         for ((k, v) in slots) {
             resolved = resolved.replace("{$k}", v, ignoreCase = true)
         }

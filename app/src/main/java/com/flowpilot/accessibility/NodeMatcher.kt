@@ -94,7 +94,10 @@ class NodeMatcher {
             text = spec.text?.resolveSlot(),
             textContains = spec.textContains?.resolveSlot(),
             contentDescription = spec.contentDescription?.resolveSlot(),
-            contextTextContains = spec.contextTextContains?.resolveSlot()
+            contextTextContains = spec.contextTextContains?.resolveSlot(),
+            hintText = spec.hintText?.resolveSlot(),
+            resourceId = spec.resourceId?.resolveSlot(),
+            semantic = spec.semantic?.resolveSlot()
         )
     }
 
@@ -111,7 +114,17 @@ class NodeMatcher {
 
         val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
-        val nodeResId = try { node.viewIdResourceName?.substringAfterLast('/') ?: "" } catch (e: Exception) { "" }
+        val rawNodeId = try { node.viewIdResourceName ?: "" } catch (e: Exception) { "" }
+        val nodeResId = rawNodeId.substringAfterLast('/')
+
+        // Fast-path exact resource ID match
+        if (spec.resourceId != null) {
+            val specId = spec.resourceId
+            if (rawNodeId.equals(specId, ignoreCase = true) ||
+                (specId.isNotEmpty() && rawNodeId.endsWith("/" + specId.substringAfterLast('/')))) {
+                return if (node.isClickable) 0.95f else 0.85f
+            }
+        }
 
         // Fast-path direct text / contentDescription / symbol match for buttons and controls
         if (spec.text != null) {
