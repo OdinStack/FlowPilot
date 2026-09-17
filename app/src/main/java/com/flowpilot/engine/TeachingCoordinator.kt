@@ -71,7 +71,17 @@ class TeachingCoordinator(
 
         val service = FlowPilotAccessibilityService.instance
         if (service != null) {
-            service.startRecording(null)
+            val resolvedApp = resolvePackageFromUtterance(utterance)
+            if (resolvedApp != null) {
+                Log.w(TAG, "Auto-detected target app '$resolvedApp' from utterance \"$utterance\". Starting recording for target package...")
+                detectedTargetPackage = resolvedApp
+                service.startRecording(resolvedApp)
+                scope.launch {
+                    service.actionExecutor.openApp(resolvedApp)
+                }
+            } else {
+                service.startRecording(null)
+            }
         } else {
             Log.e(TAG, "AccessibilityService not connected yet! Cannot record actions.")
             stateMachine.setError("Accessibility Service not connected. Enable FlowPilot in Android Settings.")
@@ -151,5 +161,55 @@ class TeachingCoordinator(
         FlowPilotAccessibilityService.instance?.stopRecording()
         rawActions.clear()
         stateMachine.reset()
+    }
+
+    /**
+     * Attempt to match any installed app package against keywords or app names in the utterance.
+     * E.g. "buy headphones on amazon" -> finds amazon package and returns it.
+     */
+    private fun resolvePackageFromUtterance(utterance: String): String? {
+        val lower = utterance.lowercase()
+        val pm = context.packageManager
+        val apps = try {
+            pm.getInstalledApplications(0)
+        } catch (e: Exception) {
+            return null
+        }
+
+        val commonKeywords = mapOf(
+            "amazon" to listOf("amazon", "mshop"),
+            "zomato" to listOf("zomato"),
+            "swiggy" to listOf("swiggy"),
+            "flipkart" to listOf("flipkart"),
+            "calculator" to listOf("calculator", "calc"),
+            "uber" to listOf("uber"),
+            "ola" to listOf("olacabs", "ola"),
+            "blinkit" to listOf("grofers", "blinkit"),
+            "zepto" to listOf("zepto"),
+            "whatsapp" to listOf("whatsapp"),
+            "youtube" to listOf("youtube"),
+            "spotify" to listOf("spotify")
+        )
+
+        for ((keyword, tokens) in commonKeywords) {
+            if (lower.contains(keyword)) {
+                val match = apps.firstOrNull { app ->
+                    tokens.any { token -> app.packageName.contains(token, ignoreCase = true) }
+                }
+                if (match != null) return match.packageName
+            }
+        }
+
+        // Generic fallback: check installed app labels
+        for (app in apps) {
+            if (com.flowpilot.util.Constants.isSystemOrLauncherPackage(app.packageName)) continue
+            if (app.packageName == context.packageName) continue
+            val label = try { pm.getApplicationLabel(app).toString().lowercase() } catch (e: Exception) { "" }
+            if (label.length >= 3 && lower.contains(label)) {
+                return app.packageName
+            }
+        }
+
+        return null
     }
 }

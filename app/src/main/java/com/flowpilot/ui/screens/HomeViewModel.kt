@@ -21,6 +21,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+data class ReplayFailureInfo(
+    val workflowName: String,
+    val stepIndex: Int,
+    val totalSteps: Int,
+    val stepDescription: String,
+    val reason: String,
+    val suggestion: String,
+    val workflow: Workflow,
+    val slotValues: Map<String, String>
+)
+
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
@@ -102,6 +113,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val _replayFailure = MutableStateFlow<ReplayFailureInfo?>(null)
+    val replayFailure: StateFlow<ReplayFailureInfo?> = _replayFailure.asStateFlow()
+
+    fun dismissReplayFailure() {
+        _replayFailure.value = null
+    }
+
+    fun retryFailedWorkflow() {
+        val failure = _replayFailure.value ?: return
+        dismissReplayFailure()
+        replayWorkflow(failure.workflow, failure.slotValues)
+    }
+
     fun replayWorkflow(workflow: Workflow, slotValues: Map<String, String> = emptyMap()) {
         val service = FlowPilotAccessibilityService.instance
         if (service == null) {
@@ -116,13 +140,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val result = replayEngine.execute(workflow, slotValues)
             viewModelScope.launch(Dispatchers.Main) {
                 if (result.success) {
+                    _replayFailure.value = null
                     if (result.stopReason != null && result.stopReason.contains("Credential", ignoreCase = true)) {
                         voiceManager.speak("I've stopped at the security screen. Please complete this step yourself.")
                     } else {
                         voiceManager.speak("Finished executing ${workflow.name} successfully.")
                     }
                 } else {
-                    voiceManager.speak("Replay stopped: ${result.stopReason ?: "an error occurred"}")
+                    val failedStep = workflow.steps.getOrNull(result.stepsCompleted)
+                    val stepNum = result.stepsCompleted + 1
+                    val stepDesc = failedStep?.description?.ifBlank { "${failedStep.type.name} step $stepNum" } ?: "Step $stepNum"
+
+                    val suggestion = when {
+                        workflow.targetAppPackage.contains("zomato", ignoreCase = true) ->
+                            "In Zomato, search results display categories and dish suggestions before the full menu. Tap a dish suggestion (like 'Chicken Biryani Dish') or scroll down to find the Add button."
+                        workflow.targetAppPackage.contains("amazon", ignoreCase = true) ->
+                            "In Amazon, sponsored ads and filter banners appear at the top. Scroll down past sponsored items to find your product."
+                        else ->
+                            "Make sure the target app is showing the expected screen, or demonstrate the steps again."
+                    }
+
+                    _replayFailure.value = ReplayFailureInfo(
+                        workflowName = workflow.name.replace('_', ' ').replaceFirstChar { it.uppercase() },
+                        stepIndex = stepNum,
+                        totalSteps = workflow.steps.size,
+                        stepDescription = stepDesc,
+                        reason = result.stopReason ?: "Could not find or interact with the target element",
+                        suggestion = suggestion,
+                        workflow = workflow,
+                        slotValues = slotValues
+                    )
+
+                    voiceManager.speak("Replay stopped at step $stepNum. $stepDesc could not be completed.")
                 }
             }
         }

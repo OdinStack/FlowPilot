@@ -275,7 +275,7 @@ class ReplayEngine(
         step: WorkflowStep,
         slots: Map<String, String>
     ): StepResult {
-        // 1. Try single element direct click
+        // 1. Try single element direct click on current screen
         val directResult = findAndAct(service, step, slots, "CLICK") { node ->
             actionExecutor.click(node)
         }
@@ -283,7 +283,24 @@ class ReplayEngine(
             return directResult
         }
 
-        // 2. Fallback: if element not found, check if it's a multi-character keypad entry (e.g. "10", "42")
+        // 2. If element was not found and scrollToFind is enabled: swipe scroll and retry
+        if (step.scrollToFind) {
+            Log.w(TAG, "Target not visible on screen; performing swipe scroll to locate element...")
+            for (attempt in 1..Constants.MAX_SCROLL_ATTEMPTS) {
+                actionExecutor.swipeScroll(forward = true)
+                delay(800)
+
+                val scrollResult = findAndAct(service, step, slots, "CLICK") { node ->
+                    actionExecutor.click(node)
+                }
+                if (scrollResult.success) {
+                    Log.w(TAG, "Found and clicked element after $attempt swipe scrolls")
+                    return scrollResult
+                }
+            }
+        }
+
+        // 3. Fallback: if element not found, check if it's a multi-character keypad entry (e.g. "10", "42")
         val resolved = resolveTargetText(step, slots)
         if (resolved != null) {
             val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, resolved)
@@ -292,7 +309,13 @@ class ReplayEngine(
             }
         }
 
-        return directResult
+        val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: step.target.resourceId ?: "target element"
+        val errorDetail = if (step.scrollToFind) {
+            "Could not locate \"$targetDesc\" even after scrolling down ${Constants.MAX_SCROLL_ATTEMPTS} times."
+        } else {
+            "Element not found on current screen: \"$targetDesc\"."
+        }
+        return StepResult(step.index, false, "CLICK", errorDetail, 0)
     }
 
     private suspend fun executeType(
@@ -327,12 +350,9 @@ class ReplayEngine(
         actionExecutor: ActionExecutor,
         step: WorkflowStep
     ): StepResult {
-        val root = service.rootInActiveWindow ?: return StepResult(step.index, false, "SCROLL", "Active window not available", 0)
-
-        val scrollable = findScrollableNode(root)
-            ?: return StepResult(step.index, false, "SCROLL", "No scrollable container found", 0)
-
         val forward = !step.value.equals("UP", ignoreCase = true)
+        val root = service.rootInActiveWindow
+        val scrollable = root?.let { findScrollableNode(it) }
         val success = actionExecutor.scroll(scrollable, forward)
         return StepResult(step.index, success, "SCROLL", "Scrolled ${if (forward) "down" else "up"}", 0)
     }
@@ -350,19 +370,16 @@ class ReplayEngine(
 
         // Scroll and search if element is not yet on screen
         if (match == null && step.scrollToFind) {
-            Log.d(TAG, "Target not visible; scrolling to find element...")
-            val scrollable = findScrollableNode(root)
-            if (scrollable != null) {
-                for (attempt in 1..Constants.MAX_SCROLL_ATTEMPTS) {
-                    actionExecutor.scroll(scrollable, forward = true)
-                    delay(800)
+            Log.w(TAG, "Target not visible; scrolling to find element...")
+            for (attempt in 1..Constants.MAX_SCROLL_ATTEMPTS) {
+                actionExecutor.swipeScroll(forward = true)
+                delay(800)
 
-                    val newRoot = service.rootInActiveWindow ?: continue
-                    match = nodeMatcher.findBestMatch(newRoot, step.target, slots)
-                    if (match != null) {
-                        Log.d(TAG, "Found element after $attempt scrolls")
-                        break
-                    }
+                val newRoot = service.rootInActiveWindow ?: continue
+                match = nodeMatcher.findBestMatch(newRoot, step.target, slots)
+                if (match != null) {
+                    Log.w(TAG, "Found element after $attempt scrolls")
+                    break
                 }
             }
         }
@@ -377,7 +394,12 @@ class ReplayEngine(
             }
 
             val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: "target element"
-            return StepResult(step.index, false, "FIND_AND_CLICK", "Could not locate: $targetDesc", 0)
+            val errorDetail = if (step.scrollToFind) {
+                "Could not locate \"$targetDesc\" even after scrolling down ${Constants.MAX_SCROLL_ATTEMPTS} times."
+            } else {
+                "Could not locate \"$targetDesc\" on screen."
+            }
+            return StepResult(step.index, false, "FIND_AND_CLICK", errorDetail, 0)
         }
 
         val success = actionExecutor.click(match.node)

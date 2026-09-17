@@ -90,30 +90,85 @@ class ActionExecutor(private val service: AccessibilityService) {
     }
 
     /**
-     * Scroll a scrollable node forward or backward.
+     * Scroll via physical gesture swipe on screen.
+     * This works reliably across all UI frameworks (Compose, Flutter, WebView, RecyclerView)
+     * where AccessibilityNodeInfo scroll actions may be unimplemented or ignored.
      */
-    suspend fun scroll(node: AccessibilityNodeInfo, forward: Boolean): Boolean {
-        Log.d(TAG, "Scrolling ${if (forward) "forward" else "backward"}")
+    suspend fun swipeScroll(forward: Boolean): Boolean {
+        val displayMetrics = service.resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
 
-        // Find the scrollable node (might be the node itself or an ancestor)
-        var scrollable = node
-        if (!node.isScrollable) {
-            scrollable = findScrollableAncestor(node) ?: run {
-                Log.w(TAG, "No scrollable node found")
-                return false
+        val centerX = width / 2f
+        val startY: Float
+        val endY: Float
+
+        if (forward) {
+            // Scroll down: swipe finger upward from 75% to 25% of screen
+            startY = height * 0.75f
+            endY = height * 0.25f
+        } else {
+            // Scroll up: swipe finger downward from 25% to 75% of screen
+            startY = height * 0.25f
+            endY = height * 0.75f
+        }
+
+        Log.w(TAG, "Dispatching swipe scroll: ($centerX, $startY) -> ($centerX, $endY)")
+        val swiped = suspendCancellableCoroutine<Boolean> { cont ->
+            val path = Path().apply {
+                moveTo(centerX, startY)
+                lineTo(centerX, endY)
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 300))
+                .build()
+
+            val callback = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }
+
+            val dispatched = service.dispatchGesture(gesture, callback, null)
+            if (!dispatched && cont.isActive) {
+                cont.resume(false)
+            }
+        }
+        delay(800) // Settle delay for content loading and scroll momentum
+        return swiped
+    }
+
+    /**
+     * Scroll a scrollable node forward or backward.
+     * Tries node accessibility action first, then automatically falls back to gesture swipe.
+     */
+    suspend fun scroll(node: AccessibilityNodeInfo? = null, forward: Boolean): Boolean {
+        Log.w(TAG, "Scrolling ${if (forward) "forward" else "backward"}")
+
+        if (node != null) {
+            var scrollable = node
+            if (!node.isScrollable) {
+                scrollable = findScrollableAncestor(node) ?: node
+            }
+            val action = if (forward) {
+                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            } else {
+                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            }
+
+            val result = scrollable.performAction(action)
+            if (scrollable !== node) scrollable.recycle()
+            if (result) {
+                delay(800)
+                return true
             }
         }
 
-        val action = if (forward) {
-            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-        } else {
-            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-        }
-
-        val result = scrollable.performAction(action)
-        if (scrollable !== node) scrollable.recycle()
-        delay(800) // Scroll needs more time for content to load
-        return result
+        // Universal fallback: Gesture swipe works regardless of accessibility node support
+        return swipeScroll(forward)
     }
 
     /**

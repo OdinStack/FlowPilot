@@ -72,6 +72,8 @@ object Constants {
             "com.oppo.launcher",
             "com.oneplus.launcher",
             "com.nothing.launcher",
+            "com.coloros.home",
+            "com.heytap.launcher",
             "com.android.systemui",
             "com.samsung.android.honeyboard",
             "com.samsung.android.app.galaxyfinder",
@@ -83,6 +85,9 @@ object Constants {
                 lower.contains("systemui") ||
                 lower.contains("keyboard") ||
                 lower.contains("honeyboard") ||
-                lower.contains("quicksearch")
+                lower.contains("quicksearch") ||
+                lower.contains("home") ||
+                lower.contains("inputmethod") ||
+                lower.contains("safecenter")
     }
 }
