@@ -138,11 +138,13 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
 
     private fun parseWorkflowFromJson(jsonStr: String, fallbackPackage: String): Workflow? {
         return try {
-            val cleanJson = jsonStr.trim()
-                .removePrefix("```json")
-                .removePrefix("```")
-                .removeSuffix("```")
-                .trim()
+            val startIdx = jsonStr.indexOf('{')
+            val endIdx = jsonStr.lastIndexOf('}')
+            if (startIdx == -1 || endIdx == -1 || endIdx < startIdx) {
+                Log.e(TAG, "No JSON object found in response: $jsonStr")
+                return null
+            }
+            val cleanJson = jsonStr.substring(startIdx, endIdx + 1)
             val json = Json { ignoreUnknownKeys = true; isLenient = true }
             val obj = json.parseToJsonElement(cleanJson).jsonObject
 
@@ -163,7 +165,7 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
                 steps = steps
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse workflow JSON", e)
+            Log.e(TAG, "Failed to parse workflow JSON: $jsonStr", e)
             null
         }
     }

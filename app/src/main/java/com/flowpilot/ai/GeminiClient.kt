@@ -24,67 +24,86 @@ class GeminiClient(private val apiKey: String) {
         .build()
 
     private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"
-    private val model = "gemini-3.6-flash"
+    private val candidateModels = listOf("gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash")
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
-     * Send a prompt to Gemini and get a text response.
+     * Send a prompt to Gemini and get a text response, with fallback model support.
      */
     suspend fun generate(
         systemPrompt: String,
         userPrompt: String,
         jsonMode: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
-        try {
-            val requestBody = buildJsonObject {
-                put("system_instruction", buildJsonObject {
+        val requestBody = buildJsonObject {
+            put("system_instruction", buildJsonObject {
+                putJsonArray("parts") {
+                    addJsonObject { put("text", systemPrompt) }
+                }
+            })
+            putJsonArray("contents") {
+                addJsonObject {
+                    put("role", "user")
                     putJsonArray("parts") {
-                        addJsonObject { put("text", systemPrompt) }
+                        addJsonObject { put("text", userPrompt) }
                     }
+                }
+            }
+            if (jsonMode) {
+                put("generationConfig", buildJsonObject {
+                    put("responseMimeType", "application/json")
+                    put("temperature", 0.1)
                 })
-                putJsonArray("contents") {
-                    addJsonObject {
-                        put("role", "user")
-                        putJsonArray("parts") {
-                            addJsonObject { put("text", userPrompt) }
-                        }
-                    }
-                }
-                if (jsonMode) {
-                    put("generationConfig", buildJsonObject {
-                        put("responseMimeType", "application/json")
-                        put("temperature", 0.1)
-                    })
-                }
             }
-
-            val request = Request.Builder()
-                .url("$baseUrl/$model:generateContent?key=$apiKey")
-                .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = client.newCall(request).execute()
-            val body = response.body?.string()
-
-            if (!response.isSuccessful) {
-                Log.e(TAG, "API error ${response.code}: $body")
-                return@withContext null
-            }
-
-            if (body == null) return@withContext null
-
-            val jsonResponse = json.parseToJsonElement(body).jsonObject
-            val candidates = jsonResponse["candidates"]?.jsonArray ?: return@withContext null
-            val content = candidates[0].jsonObject["content"]?.jsonObject
-            val parts = content?.get("parts")?.jsonArray ?: return@withContext null
-            val text = parts[0].jsonObject["text"]?.jsonPrimitive?.content
-
-            Log.d(TAG, "Gemini response (${text?.length ?: 0} chars)")
-            text
-        } catch (e: Exception) {
-            Log.e(TAG, "API call failed", e)
-            null
         }
+        val mediaType = "application/json".toMediaType()
+        val bodyContent = requestBody.toString()
+
+        for (model in candidateModels) {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/$model:generateContent?key=$apiKey")
+                    .post(bodyContent.toRequestBody(mediaType))
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val body = response.body?.string()
+
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Model $model returned HTTP ${response.code}: $body. Trying next fallback...")
+                    continue
+                }
+
+                if (body == null) continue
+
+                val jsonResponse = json.parseToJsonElement(body).jsonObject
+                val candidates = jsonResponse["candidates"]?.jsonArray ?: continue
+                if (candidates.isEmpty()) continue
+                val content = candidates[0].jsonObject["content"]?.jsonObject
+                val parts = content?.get("parts")?.jsonArray ?: continue
+
+                val textParts = parts.mapNotNull { p ->
+                    val pObj = p.jsonObject
+                    if (pObj["thought"]?.jsonPrimitive?.booleanOrNull == true) null
+                    else pObj["text"]?.jsonPrimitive?.contentOrNull
+                }.filter { it.isNotBlank() }
+
+                val text = if (textParts.isNotEmpty()) {
+                    textParts.joinToString("\n")
+                } else {
+                    parts.firstNotNullOfOrNull { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull }
+                }
+
+                if (!text.isNullOrBlank()) {
+                    Log.d(TAG, "Gemini response using $model (${text.length} chars)")
+                    return@withContext text
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Model $model call failed: ${e.message}. Trying next fallback...", e)
+            }
+        }
+        Log.e(TAG, "All candidate Gemini models failed")
+        null
     }
 
     /**
