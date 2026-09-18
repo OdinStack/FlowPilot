@@ -104,9 +104,29 @@ class FlowPilotAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // If a specific target package was locked, filter out events from other apps
-            if (recordingPackage != null && eventPackage != recordingPackage) {
+            // Ignore system launchers
+            if (com.flowpilot.util.Constants.isSystemOrLauncherPackage(eventPackage)) {
                 return
+            }
+
+            // If a specific target package was locked, verify relevance:
+            if (recordingPackage != null) {
+                val target = recordingPackage!!.lowercase()
+                val targetToken = if (target.contains('.')) {
+                    target.split('.').filter { it !in listOf("com", "android", "apps", "app", "google", "application") }.lastOrNull() ?: target
+                } else target
+
+                val lowerEventPkg = eventPackage.lowercase()
+                val isTargetApp = lowerEventPkg == target || lowerEventPkg.contains(targetToken)
+                val isKeyboard = lowerEventPkg.contains("inputmethod") ||
+                        lowerEventPkg.contains("keyboard") ||
+                        lowerEventPkg.contains("gboard") ||
+                        lowerEventPkg.contains("latin")
+                val isTextChange = event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+
+                if (!isTargetApp && !isKeyboard && !isTextChange) {
+                    return
+                }
             }
 
             when (event.eventType) {

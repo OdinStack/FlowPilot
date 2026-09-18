@@ -110,6 +110,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteWorkflow(workflow: Workflow) {
         viewModelScope.launch(Dispatchers.IO) {
             app.repository.deleteWorkflow(workflow.id)
+            _savedWorkflows.value = _savedWorkflows.value.filter { it.id != workflow.id }
+            if (_lastSynthesizedWorkflow.value?.id == workflow.id) {
+                _lastSynthesizedWorkflow.value = null
+            }
         }
     }
 
@@ -283,13 +287,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${result.actions.size} actions with AI...")
 
                 // Step 1: Synthesize workflow from demonstration using Gemini
-                val workflow = app.workflowSynthesizer.synthesize(result)
+                val synthResult = app.workflowSynthesizer.synthesize(result)
+                val workflow = synthResult.workflow
 
                 if (workflow == null) {
-                    Log.e(TAG, "Workflow synthesis failed")
-                    stateMachine.setError("Workflow synthesis failed. Please check your API key or internet connection.")
+                    val reason = synthResult.errorReason ?: "Could not understand demonstration"
+                    Log.e(TAG, "Workflow synthesis failed: $reason")
+                    stateMachine.setError("Learning failed: $reason")
                     viewModelScope.launch(Dispatchers.Main) {
-                        voiceManager.speak("Sorry, I couldn't understand the workflow. Please try teaching again.")
+                        voiceManager.speak("Sorry, $reason. Please try teaching again.")
                     }
                     return@launch
                 }
@@ -302,6 +308,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 app.repository.saveWorkflow(workflowWithEmbedding)
 
                 _lastSynthesizedWorkflow.value = workflowWithEmbedding
+                _savedWorkflows.value = listOf(workflowWithEmbedding) + _savedWorkflows.value.filter { it.id != workflowWithEmbedding.id }
 
                 Log.i(TAG, "Workflow '${workflow.name}' synthesized and saved. ${workflow.steps.size} steps, ${workflow.slots.size} slots.")
 

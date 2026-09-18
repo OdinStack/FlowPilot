@@ -199,7 +199,7 @@ class ReplayEngine(
             }
 
             // Settle delay between steps for UI animations
-            delay(Constants.UI_SETTLE_DELAY_MS.coerceAtLeast(600L))
+            delay(350L)
         }
 
         Log.i(TAG, "Workflow '${workflow.name}' replay completed successfully!")

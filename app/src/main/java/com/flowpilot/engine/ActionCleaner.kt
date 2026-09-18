@@ -35,9 +35,20 @@ class ActionCleaner {
     }
 
     private fun List<RecordedAction>.filterByPackage(pkg: String): List<RecordedAction> {
-        if (pkg.isBlank()) return filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
-        val filtered = filter { it.packageName == pkg }
-        return if (filtered.isNotEmpty()) filtered else filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
+        val nonSystem = filter { !com.flowpilot.util.Constants.isSystemOrLauncherPackage(it.packageName) }
+        if (pkg.isBlank()) return nonSystem
+
+        val token = if (pkg.contains('.')) {
+            pkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google", "application") }.lastOrNull() ?: pkg
+        } else pkg
+
+        val filtered = nonSystem.filter { action ->
+            action.packageName.contains(token, ignoreCase = true) ||
+            action.type == ActionType.TYPE ||
+            action.packageName.contains("keyboard", ignoreCase = true) ||
+            action.packageName.contains("inputmethod", ignoreCase = true)
+        }
+        return if (filtered.isNotEmpty()) filtered else nonSystem
     }
 
     private fun List<RecordedAction>.mergeDuplicateClicks(): List<RecordedAction> {

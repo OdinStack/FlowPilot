@@ -25,22 +25,28 @@ class ActionExecutor(private val service: AccessibilityService) {
     suspend fun click(node: AccessibilityNodeInfo): Boolean {
         Log.d(TAG, "Clicking: ${node.text ?: node.contentDescription ?: node.viewIdResourceName ?: "unknown"}")
 
-        // Try clicking the node directly
+        // 1. Try clicking the node directly via accessibility action
         if (node.isClickable) {
             val result = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            delay(Constants.UI_SETTLE_DELAY_MS)
-            return result
+            if (result) {
+                delay(Constants.UI_SETTLE_DELAY_MS)
+                return true
+            }
+            Log.w(TAG, "Direct performAction(ACTION_CLICK) returned false; trying clickable ancestors...")
         }
 
-        // Walk up to find clickable ancestor
+        // 2. Walk up to find clickable ancestor
         var current: AccessibilityNodeInfo? = node.parent
         var depth = 0
         while (current != null && depth < 5) {
             if (current.isClickable) {
                 val result = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 current.recycle()
-                delay(Constants.UI_SETTLE_DELAY_MS)
-                return result
+                if (result) {
+                    delay(Constants.UI_SETTLE_DELAY_MS)
+                    return true
+                }
+                break
             }
             val next = current.parent
             current.recycle()
@@ -49,10 +55,17 @@ class ActionExecutor(private val service: AccessibilityService) {
         }
         current?.recycle()
 
-        // Fallback: tap at the center of the node's bounds using gesture
+        // 3. Guaranteed Fallback: tap at the center of the node's bounds using hardware gesture dispatch
         val bounds = android.graphics.Rect()
         node.getBoundsInScreen(bounds)
-        return tapAtCoordinates(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            Log.w(TAG, "Falling back to coordinate gesture tap at center: (${bounds.centerX()}, ${bounds.centerY()})")
+            val tapped = tapAtCoordinates(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+            delay(Constants.UI_SETTLE_DELAY_MS)
+            return tapped
+        }
+
+        return false
     }
 
     /**

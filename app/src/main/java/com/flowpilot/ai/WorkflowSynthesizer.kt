@@ -5,6 +5,11 @@ import com.flowpilot.data.models.*
 import com.flowpilot.engine.TeachingResult
 import kotlinx.serialization.json.*
 
+data class SynthesisResult(
+    val workflow: Workflow?,
+    val errorReason: String? = null
+)
+
 class WorkflowSynthesizer(private val gemini: GeminiClient) {
 
     companion object {
@@ -73,12 +78,15 @@ IMPORTANT:
 """
     }
 
-    suspend fun synthesize(teaching: TeachingResult): Workflow? {
+    suspend fun synthesize(teaching: TeachingResult): SynthesisResult {
+        if (teaching.actions.isEmpty()) {
+            return SynthesisResult(null, "No actions were recorded during teaching.")
+        }
+
         val actionsDescription = formatActionsForLLM(teaching.actions)
         val prompt = buildSynthesisPrompt(teaching.utterance, actionsDescription, teaching.targetPackage)
 
-        Log.d(TAG, "Synthesizing workflow for: \"${teaching.utterance}\"")
-        Log.d(TAG, "Actions to synthesize:\n$actionsDescription")
+        Log.d(TAG, "Synthesizing workflow for: \"${teaching.utterance}\" (${teaching.actions.size} actions)")
 
         val response = gemini.generate(
             systemPrompt = SYNTHESIS_SYSTEM_PROMPT,
@@ -88,11 +96,15 @@ IMPORTANT:
 
         if (response == null) {
             Log.e(TAG, "Gemini returned null for synthesis")
-            return null
+            return SynthesisResult(null, "Gemini API unavailable or request timed out.")
         }
 
-        Log.d(TAG, "Raw synthesis response: $response")
-        return parseWorkflowFromJson(response, teaching.targetPackage)
+        val parsed = parseWorkflowFromJson(response, teaching.targetPackage)
+        return if (parsed != null) {
+            SynthesisResult(parsed, null)
+        } else {
+            SynthesisResult(null, "Could not parse valid workflow JSON from AI response.")
+        }
     }
 
     private fun formatActionsForLLM(actions: List<RecordedAction>): String {
