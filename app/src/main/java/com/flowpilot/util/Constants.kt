@@ -15,7 +15,7 @@ object Constants {
     const val STEP_TIMEOUT_MS = 10_000L
     
     // Matching thresholds
-    const val NODE_MATCH_THRESHOLD = 0.6f
+    const val NODE_MATCH_THRESHOLD = 0.5f
     const val HIGH_CONFIDENCE_THRESHOLD = 0.88f
     const val LOW_CONFIDENCE_THRESHOLD = 0.55f
     

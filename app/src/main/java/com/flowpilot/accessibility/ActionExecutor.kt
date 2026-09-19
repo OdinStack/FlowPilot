@@ -42,6 +42,7 @@ class ActionExecutor(private val service: AccessibilityService) {
             if (current.isClickable) {
                 val result = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 current.recycle()
+                current = null // Prevent double-recycle below
                 if (result) {
                     delay(Constants.UI_SETTLE_DELAY_MS)
                     return true

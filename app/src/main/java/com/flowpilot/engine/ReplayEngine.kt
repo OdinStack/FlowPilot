@@ -7,7 +7,6 @@ import com.flowpilot.accessibility.FlowPilotAccessibilityService
 import com.flowpilot.accessibility.NodeMatcher
 import com.flowpilot.accessibility.SafetyDetector
 import com.flowpilot.accessibility.ScreenAnalyzer
-import com.flowpilot.ai.GeminiClient
 import com.flowpilot.data.models.StepType
 import com.flowpilot.data.models.TargetSpec
 import com.flowpilot.data.models.Workflow
@@ -20,23 +19,12 @@ class ReplayEngine(
     private val nodeMatcher: NodeMatcher = NodeMatcher(),
     private val safetyDetector: SafetyDetector = SafetyDetector(),
     private val screenAnalyzer: ScreenAnalyzer = ScreenAnalyzer(),
-    private val gemini: GeminiClient? = null,
     private val stateMachine: SystemStateMachine
 ) {
 
     companion object {
         private const val TAG = "ReplayEngine"
     }
-
-    constructor(
-        service: FlowPilotAccessibilityService,
-        nodeMatcher: NodeMatcher,
-        actionExecutor: ActionExecutor,
-        safetyDetector: SafetyDetector,
-        screenAnalyzer: ScreenAnalyzer,
-        gemini: GeminiClient,
-        stateMachine: SystemStateMachine
-    ) : this({ service }, nodeMatcher, safetyDetector, screenAnalyzer, gemini, stateMachine)
 
     data class StepResult(
         val stepIndex: Int,
@@ -96,30 +84,10 @@ class ReplayEngine(
 
         if (targetPkg.isNotBlank() && !firstStepIsOpenApp) {
             val currentPkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
-            val token = if (targetPkg.contains('.')) {
-                targetPkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: targetPkg
-            } else {
-                targetPkg
-            }
-            val isForeground = currentPkg.contains(token, ignoreCase = true) || currentPkg.equals(targetPkg, ignoreCase = true)
-
-            if (!isForeground) {
-                Log.w(TAG, "Target app '$targetPkg' is not in foreground (current: '$currentPkg'). Launching target app...")
+            if (!isPackageInForeground(currentPkg, targetPkg)) {
+                Log.w(TAG, "Target app '$targetPkg' not in foreground (current: '$currentPkg'). Launching...")
                 stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
-                val launched = actionExecutor.openApp(targetPkg)
-                if (launched) {
-                    for (i in 1..10) {
-                        delay(500)
-                        val activePkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
-                        if (activePkg.contains(token, ignoreCase = true) || activePkg.equals(targetPkg, ignoreCase = true)) {
-                            Log.w(TAG, "Target app '$targetPkg' confirmed in foreground (active: '$activePkg')")
-                            break
-                        }
-                    }
-                    delay(1000)
-                } else {
-                    Log.w(TAG, "Failed to launch target app: $targetPkg")
-                }
+                launchAndWaitForApp(service, actionExecutor, targetPkg)
             }
         }
 
@@ -133,19 +101,19 @@ class ReplayEngine(
             val currentRoot = service.rootInActiveWindow
             if (currentRoot != null) {
                 val safety = safetyDetector.check(currentRoot)
-                if (safety !is SafetyDetector.SafetyResult.Safe) {
-                    val reason = when (safety) {
-                        is SafetyDetector.SafetyResult.Credential -> safety.reason
-                        is SafetyDetector.SafetyResult.Payment -> safety.reason
+                val isSafetyBoundary = safety !is SafetyDetector.SafetyResult.Safe
+                val isMarkedCredential = step.isCredentialBoundary
+
+                if (isSafetyBoundary || isMarkedCredential) {
+                    val reason = when {
+                        safety is SafetyDetector.SafetyResult.Credential -> safety.reason
+                        safety is SafetyDetector.SafetyResult.Payment -> safety.reason
+                        isMarkedCredential -> "Step marked as credential/payment boundary"
                         else -> "Security boundary reached"
                     }
 
                     Log.w(TAG, "Safety boundary detected at step ${step.index}: $reason")
-                    if (step.isCredentialBoundary) {
-                        stateMachine.transition(SystemMode.PAUSED, "Payment/login screen reached. Your turn!")
-                    } else {
-                        stateMachine.transition(SystemMode.PAUSED, "Security screen reached ($reason). Please complete manually.")
-                    }
+                    stateMachine.transition(SystemMode.PAUSED, "Payment/login screen reached. Your turn!")
 
                     stepResults.add(
                         StepResult(
@@ -251,21 +219,7 @@ class ReplayEngine(
             ?: return StepResult(step.index, false, "OPEN_APP", "No target package specified", 0)
 
         Log.w(TAG, "Opening target app: $targetPkg")
-        val success = actionExecutor.openApp(targetPkg)
-        val token = if (targetPkg.contains('.')) {
-            targetPkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: targetPkg
-        } else {
-            targetPkg
-        }
-        for (i in 1..10) {
-            delay(500)
-            val activePkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
-            if (activePkg.contains(token, ignoreCase = true) || activePkg.equals(targetPkg, ignoreCase = true)) {
-                Log.w(TAG, "Target app '$targetPkg' confirmed in foreground (active: '$activePkg')")
-                break
-            }
-        }
-        delay(1000)
+        val success = launchAndWaitForApp(service, actionExecutor, targetPkg)
         return StepResult(step.index, success, "OPEN_APP", "Opened $targetPkg", 0)
     }
 
@@ -527,7 +481,7 @@ class ReplayEngine(
         resolvedText: String
     ): StepResult? {
         val clean = resolvedText.trim()
-        if (clean.length <= 1 || !clean.matches(Regex("^[0-9.+-/*×÷=]+$"))) {
+        if (clean.isEmpty() || !clean.matches(Regex("^[0-9.+\\-/*×÷=]+$"))) {
             return null
         }
 
@@ -575,5 +529,48 @@ class ReplayEngine(
         } else {
             null
         }
+    }
+
+    // ─── Shared Helpers ───
+
+    /** Extract the meaningful token from a package name for fuzzy matching. */
+    private fun packageToken(pkg: String): String {
+        return if (pkg.contains('.')) {
+            pkg.split('.').filter { it !in listOf("com", "android", "apps", "app", "google") }.lastOrNull() ?: pkg
+        } else {
+            pkg
+        }
+    }
+
+    /** Check if a package name is currently in the foreground. */
+    private fun isPackageInForeground(currentPkg: String, targetPkg: String): Boolean {
+        if (currentPkg.isBlank()) return false
+        val token = packageToken(targetPkg)
+        return currentPkg.contains(token, ignoreCase = true) || currentPkg.equals(targetPkg, ignoreCase = true)
+    }
+
+    /** Launch an app and wait for it to appear in the foreground. */
+    private suspend fun launchAndWaitForApp(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor,
+        targetPkg: String
+    ): Boolean {
+        val launched = actionExecutor.openApp(targetPkg)
+        if (!launched) {
+            Log.w(TAG, "Failed to launch target app: $targetPkg")
+            return false
+        }
+        val token = packageToken(targetPkg)
+        for (i in 1..10) {
+            delay(500)
+            val activePkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
+            if (activePkg.contains(token, ignoreCase = true) || activePkg.equals(targetPkg, ignoreCase = true)) {
+                Log.i(TAG, "Target app '$targetPkg' confirmed in foreground (active: '$activePkg')")
+                delay(1000) // Let the app finish initializing
+                return true
+            }
+        }
+        Log.w(TAG, "Target app '$targetPkg' did not appear in foreground within timeout")
+        return true // App was launched, just couldn't confirm foreground
     }
 }
