@@ -4,6 +4,8 @@ import android.util.Log
 import com.flowpilot.ai.IntentProcessor
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.voice.VoiceManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Handles multi-slot clarification: asks the user for each missing slot value
@@ -16,6 +18,10 @@ class ClarificationManager(
 
     companion object {
         private const val TAG = "ClarificationManager"
+        /** Max time to wait for Gemini to generate a clarification question (ms). */
+        private const val QUESTION_GEN_TIMEOUT_MS = 8_000L
+        /** Delay after TTS finishes to let audio hardware switch to mic input (ms). */
+        private const val POST_SPEAK_DELAY_MS = 600L
     }
 
     /**
@@ -36,9 +42,15 @@ class ClarificationManager(
         for (slotName in missingSlots) {
             if (resolved.containsKey(slotName)) continue
 
-            // Generate a natural question for this slot
+            // Generate a natural question — use Gemini with a short timeout,
+            // fall back to template immediately if Gemini is slow or unavailable.
             val question = try {
-                intentProcessor.generateClarificationQuestion(flow, slotName)
+                withTimeoutOrNull(QUESTION_GEN_TIMEOUT_MS) {
+                    intentProcessor.generateClarificationQuestion(flow, slotName)
+                } ?: run {
+                    Log.w(TAG, "Gemini timed out for slot '$slotName', using fallback question")
+                    fallbackQuestion(slotName)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to generate question for slot '$slotName'", e)
                 fallbackQuestion(slotName)
@@ -46,6 +58,11 @@ class ClarificationManager(
 
             Log.i(TAG, "Asking for slot '$slotName': $question")
             voiceManager.speak(question)
+
+            // Critical: delay after TTS finishes to let the audio hardware
+            // switch from speaker output to microphone input. Without this,
+            // SpeechRecognizer silently fails on the second+ listen() call.
+            delay(POST_SPEAK_DELAY_MS)
 
             // Listen for the user's answer
             val answer = voiceManager.listen()
