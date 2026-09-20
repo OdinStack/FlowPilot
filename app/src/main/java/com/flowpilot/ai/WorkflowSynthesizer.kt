@@ -95,8 +95,8 @@ IMPORTANT:
         )
 
         if (response == null) {
-            Log.e(TAG, "Gemini returned null for synthesis")
-            return SynthesisResult(null, "Gemini API unavailable or request timed out.")
+            Log.e(TAG, "All AI providers returned null for synthesis")
+            return SynthesisResult(null, "AI API unavailable or request timed out.")
         }
 
         val parsed = parseWorkflowFromJson(response, teaching.targetPackage)

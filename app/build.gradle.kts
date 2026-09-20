@@ -15,6 +15,8 @@ val localProperties = Properties().apply {
     }
 }
 val geminiApiKey = localProperties.getProperty("gemini.api.key") ?: ""
+val groqApiKey = localProperties.getProperty("groq.api.key") ?: ""
+val openRouterApiKey = localProperties.getProperty("openrouter.api.key") ?: ""
 
 android {
     namespace = "com.flowpilot"
@@ -28,6 +30,8 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+        buildConfigField("String", "GROQ_API_KEY", "\"$groqApiKey\"")
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"$openRouterApiKey\"")
     }
 
     buildTypes {

@@ -5,6 +5,21 @@ object Constants {
     val GEMINI_API_KEY: String
         get() = com.flowpilot.BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() }
             ?: "YOUR_GEMINI_API_KEY_HERE"
+
+    val GROQ_API_KEY: String
+        get() = com.flowpilot.BuildConfig.GROQ_API_KEY.takeIf { it.isNotBlank() }
+            ?: ""
+
+    val OPENROUTER_API_KEY: String
+        get() = com.flowpilot.BuildConfig.OPENROUTER_API_KEY.takeIf { it.isNotBlank() }
+            ?: ""
+
+    fun hasAnyAiKey(): Boolean {
+        val gemini = GEMINI_API_KEY.isNotBlank() && GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE"
+        val groq = GROQ_API_KEY.isNotBlank()
+        val openRouter = OPENROUTER_API_KEY.isNotBlank()
+        return gemini || groq || openRouter
+    }
     
     // Timing constants
     const val UI_SETTLE_DELAY_MS = 500L

@@ -400,13 +400,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                if (com.flowpilot.util.Constants.GEMINI_API_KEY.isBlank() ||
-                    com.flowpilot.util.Constants.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE"
-                ) {
-                    Log.w(TAG, "Gemini API key not configured")
-                    stateMachine.setError("Gemini API key missing. Set GEMINI_API_KEY in Constants.kt")
+                if (!com.flowpilot.util.Constants.hasAnyAiKey()) {
+                    Log.w(TAG, "No AI API key configured")
+                    stateMachine.setError("AI API key missing. Set API keys in Constants.kt")
                     viewModelScope.launch(Dispatchers.Main) {
-                        voiceManager.speak("Captured ${result.actions.size} actions, but Gemini API key is missing in Constants.kt.")
+                        voiceManager.speak("Captured ${result.actions.size} actions, but no AI API key is configured.")
                     }
                     return@launch
                 }
