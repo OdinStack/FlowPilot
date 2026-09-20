@@ -359,6 +359,11 @@ class ReplayEngine(
             actionExecutor.setText(node, textToType)
         }
         if (result.success) {
+            // After typing, press back to dismiss keyboard and clear text field focus
+            // This prevents subsequent scroll gestures from being captured by the text field
+            delay(300)
+            actionExecutor.pressBack()
+            delay(300)
             return result
         }
 
@@ -546,6 +551,31 @@ class ReplayEngine(
         return resolved.trim()
     }
 
+    /**
+     * Find a node whose text EXACTLY equals the target string.
+     * Used for calculator keypad where we need precise digit matching.
+     */
+    private fun findExactTextNode(root: AccessibilityNodeInfo, targetText: String): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                val nodeText = node.text?.toString()?.trim() ?: ""
+                val nodeDesc = node.contentDescription?.toString()?.trim() ?: ""
+                if ((nodeText == targetText || nodeDesc == targetText) && node.isVisibleToUser) {
+                    return node
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (e: Exception) { /* stale node */ }
+            return null
+        }
+        return search(root, 0)
+    }
+
     private suspend fun trySequentialKeypadClick(
         service: FlowPilotAccessibilityService,
         actionExecutor: ActionExecutor,
@@ -562,8 +592,6 @@ class ReplayEngine(
 
         for ((idx, char) in clean.withIndex()) {
             val charStr = char.toString()
-            val digitSpec = TargetSpec(text = charStr)
-
             var charClicked = false
             for (attempt in 1..Constants.MAX_RETRY_ATTEMPTS) {
                 val root = service.rootInActiveWindow ?: run {
@@ -571,12 +599,24 @@ class ReplayEngine(
                     continue
                 }
 
-                val match = nodeMatcher.findBestMatch(root, digitSpec, emptyMap())
+                // Find node with EXACT text match for this digit/symbol
+                val exactNode = findExactTextNode(root, charStr)
+                if (exactNode != null && exactNode.isClickable) {
+                    val clicked = actionExecutor.click(exactNode)
+                    if (clicked) {
+                        charClicked = true
+                        delay(200) // Shorter delay to avoid accidental swipe detection
+                        break
+                    }
+                }
+
+                // Fallback: try NodeMatcher but with strict spec
+                val match = nodeMatcher.findBestMatch(root, TargetSpec(text = charStr), emptyMap())
                 if (match != null) {
                     val clicked = actionExecutor.click(match.node)
                     if (clicked) {
                         charClicked = true
-                        delay(350) // Delay between keypad taps
+                        delay(200)
                         break
                     }
                 }

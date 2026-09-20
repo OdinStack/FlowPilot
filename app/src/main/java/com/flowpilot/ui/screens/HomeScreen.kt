@@ -36,9 +36,11 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -212,17 +214,13 @@ fun HomeScreen(
                 SynthesizingCard(message = systemState.message)
             }
             else -> {
-                MicButton(
+                UnifiedInputField(
                     isListening = isListening,
-                    onClick = { viewModel.onMicTapped() }
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                CommandInputField(
+                    onMicTapped = { viewModel.onMicTapped() },
                     onSendCommand = { command ->
                         viewModel.submitTextCommand(command)
-                    }
+                    },
+                    onStopListening = { viewModel.voiceManager.stop() }
                 )
             }
         }
@@ -736,55 +734,12 @@ fun ServiceStatusCard(isConnected: Boolean) {
 }
 
 @Composable
-fun MicButton(
+fun UnifiedInputField(
     isListening: Boolean,
-    onClick: () -> Unit
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = if (isListening) 1.25f else 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scaleAnim"
-    )
-
-    Box(contentAlignment = Alignment.Center) {
-        if (isListening) {
-            Box(
-                modifier = Modifier
-                    .size(96.dp)
-                    .scale(scale)
-                    .background(
-                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
-                        shape = CircleShape
-                    )
-            )
-        }
-        FloatingActionButton(
-            onClick = onClick,
-            modifier = Modifier.size(72.dp),
-            containerColor = if (isListening) MaterialTheme.colorScheme.error
-                             else MaterialTheme.colorScheme.primary,
-            shape = CircleShape
-        ) {
-            Icon(
-                imageVector = Icons.Default.Mic,
-                contentDescription = "Microphone",
-                modifier = Modifier.size(32.dp),
-                tint = MaterialTheme.colorScheme.onPrimary
-            )
-        }
-    }
-}
-
-@Composable
-fun CommandInputField(
+    onMicTapped: () -> Unit,
     onSendCommand: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true
+    onStopListening: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var text by remember { mutableStateOf("") }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -792,50 +747,111 @@ fun CommandInputField(
     fun submit() {
         val cmd = text.trim()
         if (cmd.isNotBlank()) {
+            // If mic is listening, stop it first
+            if (isListening) onStopListening()
             onSendCommand(cmd)
             text = ""
             keyboardController?.hide()
         }
     }
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            modifier = Modifier.weight(1f),
-            placeholder = { Text("Type command (e.g. Add 5 and 2)") },
-            singleLine = true,
-            enabled = enabled,
-            shape = RoundedCornerShape(24.dp),
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Default.Keyboard,
-                    contentDescription = "Keyboard"
+        // Mic button (large, centered)
+        val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+        val scale by infiniteTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = if (isListening) 1.25f else 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(600),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "scaleAnim"
+        )
+
+        Box(contentAlignment = Alignment.Center) {
+            if (isListening) {
+                Box(
+                    modifier = Modifier
+                        .size(96.dp)
+                        .scale(scale)
+                        .background(
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
+                            shape = CircleShape
+                        )
                 )
-            },
-            trailingIcon = {
-                if (text.isNotBlank()) {
+            }
+            FloatingActionButton(
+                onClick = {
+                    if (isListening) onStopListening() else onMicTapped()
+                },
+                modifier = Modifier.size(72.dp),
+                containerColor = if (isListening) MaterialTheme.colorScheme.error
+                                 else MaterialTheme.colorScheme.primary,
+                shape = CircleShape
+            ) {
+                Icon(
+                    imageVector = if (isListening) Icons.Default.MicOff else Icons.Default.Mic,
+                    contentDescription = if (isListening) "Stop Listening" else "Start Listening",
+                    modifier = Modifier.size(32.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Text input field (always enabled)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { newText ->
+                    text = newText
+                    // Auto-stop mic when user starts typing
+                    if (isListening && newText.isNotBlank()) {
+                        onStopListening()
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                placeholder = {
+                    Text(
+                        if (isListening) "Or type here instead..."
+                        else "Type command (e.g. Add 5 and 2)"
+                    )
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Keyboard,
+                        contentDescription = "Keyboard"
+                    )
+                },
+                trailingIcon = {
                     IconButton(
                         onClick = { submit() },
-                        enabled = enabled
+                        enabled = text.isNotBlank()
                     ) {
                         Icon(
                             imageVector = Icons.Default.Send,
                             contentDescription = "Send",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = if (text.isNotBlank()) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                         )
                     }
-                }
-            },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(
-                onSend = { submit() }
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(
+                    onSend = { submit() }
+                )
             )
-        )
+        }
     }
 }
