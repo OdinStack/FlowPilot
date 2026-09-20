@@ -20,6 +20,7 @@ import com.flowpilot.engine.TeachingCoordinator
 import com.flowpilot.engine.TeachingResult
 import com.flowpilot.voice.VoiceManager
 import com.flowpilot.voice.VoiceState
+import com.flowpilot.util.normalizeNumberWords
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -112,7 +113,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch(Dispatchers.Main) {
                 val result = voiceManager.listen()
                 if (!result.isNullOrBlank() && !deferred.isCompleted) {
-                    deferred.complete(result.trim())
+                    deferred.complete(result.trim().normalizeNumberWords())
                 }
             }
             return
@@ -240,7 +241,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val deferred = clarificationDeferred
         if (deferred != null && !deferred.isCompleted) {
             voiceManager.stop() // Stop listening if active
-            deferred.complete(trimmed)
+            deferred.complete(trimmed.normalizeNumberWords())
             return
         }
 
@@ -336,7 +337,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
             // Speak the question, then wait for TTS to finish
             voiceManager.speak(question)
-            delay(600) // Let audio hardware switch from TTS output to mic input
+            delay(750) // Let audio hardware switch from TTS output to mic input
 
             // Create a deferred that both voice and text input can complete
             val deferred = CompletableDeferred<String?>()
@@ -346,11 +347,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val listenJob = viewModelScope.launch(Dispatchers.Main) {
                 val voiceResult = voiceManager.listen()
                 if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
-                    deferred.complete(voiceResult.trim())
+                    deferred.complete(voiceResult.trim().normalizeNumberWords())
                 } else if (!deferred.isCompleted) {
-                    // Voice returned nothing, but don't complete with null yet —
-                    // user might still type. Wait a short time then give up.
-                    delay(5000)
+                    // Voice returned nothing, but keep waiting for user to either type or tap mic!
+                    // Wait up to 30 seconds for user input before timing out
+                    delay(30_000L)
                     if (!deferred.isCompleted) {
                         deferred.complete(null)
                     }
@@ -364,13 +365,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             clarificationDeferred = null
 
             if (!answer.isNullOrBlank()) {
-                resolved[slotName] = answer.trim()
-                Log.i(TAG, "Got answer for '$slotName': '${answer.trim()}'")
+                val normalized = answer.trim().normalizeNumberWords()
+                resolved[slotName] = normalized
+                Log.i(TAG, "Got answer for '$slotName': '$normalized' (raw: '$answer')")
             } else {
                 // Use default value if available
                 val defaultValue = flow.slots[slotName]?.defaultValue
                 if (!defaultValue.isNullOrBlank()) {
-                    resolved[slotName] = defaultValue
+                    resolved[slotName] = defaultValue.normalizeNumberWords()
                     Log.i(TAG, "Using default for '$slotName': '$defaultValue'")
                 } else {
                     Log.w(TAG, "No answer and no default for slot '$slotName'")

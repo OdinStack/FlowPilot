@@ -82,3 +82,28 @@ fun String.fuzzyContains(other: String): Boolean {
     val b = other.lowercase().replace(Regex("[^a-z0-9]"), "")
     return a.contains(b) || b.contains(a)
 }
+
+/**
+ * Normalizes spoken number words, conversational filler phrases, and math symbols
+ * into standard digits and operators (e.g., "seven" -> "7", "it's 4" -> "4", "plus" -> "+").
+ */
+fun String.normalizeNumberWords(): String {
+    val wordToDigit = listOf(
+        "zero" to "0", "one" to "1", "two" to "2", "three" to "3",
+        "four" to "4", "five" to "5", "six" to "6", "seven" to "7",
+        "eight" to "8", "nine" to "9", "ten" to "10",
+        "plus" to "+", "add" to "+", "addition" to "+",
+        "minus" to "-", "subtract" to "-", "subtraction" to "-",
+        "times" to "*", "multiply" to "*", "multiplied by" to "*",
+        "divide" to "/", "divided by" to "/",
+        "equals" to "=", "equal" to "="
+    )
+    var result = this.trim()
+    for ((word, digit) in wordToDigit) {
+        result = result.replace(Regex("(?i)\\b$word\\b"), digit)
+    }
+    // Remove filler phrases like "it's 7" or "the number is 4"
+    result = result.replace(Regex("(?i)\\b(it's|it is|the number is|make it|use|number)\\b"), "").trim()
+    return result
+}
+

@@ -52,8 +52,8 @@ RULES:
 - "Book a cab" does NOT match "Order pizza"
 - If multiple flows could match, pick the best one and explain why
 - If no flow matches, set matched=false
-- Extract slot values even if they differ from the default values
 - If a required slot is not mentioned in the command, add it to missing_required_slots
+- If the user command expresses the general intent of a workflow even without parameters (e.g. 'calculate' or 'add' matches 'add two numbers on calculator', 'order food' matches 'order on zomato'), set matched=true, set confidence=0.85, leave extracted_slots empty for what wasn't mentioned, and list the missing slots in missing_required_slots so the assistant can prompt for them.
 """
 
         private const val SLOT_EXTRACTION_SYSTEM_PROMPT = """

@@ -2,6 +2,7 @@ package com.flowpilot.engine
 
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.flowpilot.accessibility.ActionExecutor
 import com.flowpilot.accessibility.FlowPilotAccessibilityService
 import com.flowpilot.accessibility.NodeMatcher
@@ -12,6 +13,7 @@ import com.flowpilot.data.models.TargetSpec
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.data.models.WorkflowStep
 import com.flowpilot.util.Constants
+import com.flowpilot.util.normalizeNumberWords
 import kotlinx.coroutines.delay
 
 class ReplayEngine(
@@ -354,26 +356,57 @@ class ReplayEngine(
         for ((key, value) in slots) {
             textToType = textToType.replace("{$key}", value, ignoreCase = true)
         }
+        textToType = textToType.normalizeNumberWords()
 
+        // 1. If target is a Button/keypad or non-editable control, or numeric input on a calculator:
+        // Execute sequential keypad clicks directly!
+        val isNumericInput = textToType.trim().matches(Regex("^[0-9.+\\-/*×÷=]+$"))
+        val isKeypadControl = step.target.className?.contains("Button", ignoreCase = true) == true ||
+                              step.target.isEditable == false ||
+                              (isNumericInput && service.rootInActiveWindow?.packageName?.contains("calc", ignoreCase = true) == true)
+
+        if (isKeypadControl && isNumericInput) {
+            val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, textToType)
+            if (keypadResult != null) {
+                return keypadResult
+            }
+        }
+
+        // 2. Otherwise find the editable field and setText
         val result = findAndAct(service, step, slots, "TYPE") { node ->
             actionExecutor.setText(node, textToType)
         }
         if (result.success) {
-            // After typing, press back to dismiss keyboard and clear text field focus
-            // This prevents subsequent scroll gestures from being captured by the text field
-            delay(300)
-            actionExecutor.pressBack()
-            delay(300)
+            // Dismiss soft keyboard ONLY if an actual soft keyboard window is open on screen
+            dismissSoftKeyboardIfPresent(service, actionExecutor)
             return result
         }
 
-        // Fallback for non-editable fields (e.g. calculator display): try sequential keypad clicks
+        // Fallback for non-editable fields if not tried yet: try sequential keypad clicks
         val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, textToType)
         if (keypadResult != null) {
             return keypadResult
         }
 
         return result
+    }
+
+    private suspend fun dismissSoftKeyboardIfPresent(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor
+    ) {
+        try {
+            val hasSoftKeyboard = service.windows?.any {
+                it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            } == true
+            if (hasSoftKeyboard) {
+                delay(250)
+                actionExecutor.pressBack()
+                delay(250)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error checking soft keyboard window", e)
+        }
     }
 
     private suspend fun executeScroll(
@@ -552,18 +585,32 @@ class ReplayEngine(
     }
 
     /**
-     * Find a node whose text EXACTLY equals the target string.
-     * Used for calculator keypad where we need precise digit matching.
+     * Find a clickable keypad node whose text, description, or resource ID EXACTLY matches the target digit/symbol.
+     * Used for calculator keypad where we need precise digit matching and must not click formula display.
      */
     private fun findExactTextNode(root: AccessibilityNodeInfo, targetText: String): AccessibilityNodeInfo? {
         fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
-            if (depth > 20) return null
+            if (depth > 25) return null
             try {
+                if (!node.isVisibleToUser) return null
                 val nodeText = node.text?.toString()?.trim() ?: ""
                 val nodeDesc = node.contentDescription?.toString()?.trim() ?: ""
-                if ((nodeText == targetText || nodeDesc == targetText) && node.isVisibleToUser) {
+                val rawId = node.viewIdResourceName ?: ""
+                val nodeResId = rawId.substringAfterLast('/')
+
+                val isClickableOrButton = node.isClickable ||
+                    node.className?.toString()?.contains("Button", ignoreCase = true) == true
+
+                val isExactMatch = nodeText == targetText ||
+                    nodeDesc.equals(targetText, ignoreCase = true) ||
+                    nodeResId.equals("digit_$targetText", ignoreCase = true) ||
+                    nodeResId.equals("btn_$targetText", ignoreCase = true) ||
+                    nodeResId.equals("key_$targetText", ignoreCase = true)
+
+                if (isExactMatch && isClickableOrButton) {
                     return node
                 }
+
                 for (i in 0 until node.childCount) {
                     val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
                     val result = search(child, depth + 1)
@@ -582,7 +629,7 @@ class ReplayEngine(
         step: WorkflowStep,
         resolvedText: String
     ): StepResult? {
-        val clean = resolvedText.trim()
+        val clean = resolvedText.normalizeNumberWords().trim()
         if (clean.isEmpty() || !clean.matches(Regex("^[0-9.+\\-/*×÷=]+$"))) {
             return null
         }
@@ -599,9 +646,9 @@ class ReplayEngine(
                     continue
                 }
 
-                // Find node with EXACT text match for this digit/symbol
+                // Find node with EXACT text match or digit resource ID for this digit/symbol
                 val exactNode = findExactTextNode(root, charStr)
-                if (exactNode != null && exactNode.isClickable) {
+                if (exactNode != null) {
                     val clicked = actionExecutor.click(exactNode)
                     if (clicked) {
                         charClicked = true
@@ -610,8 +657,13 @@ class ReplayEngine(
                     }
                 }
 
-                // Fallback: try NodeMatcher but with strict spec
-                val match = nodeMatcher.findBestMatch(root, TargetSpec(text = charStr), emptyMap())
+                // Fallback: try NodeMatcher with strict spec
+                val digitSpec = TargetSpec(
+                    text = charStr,
+                    className = "android.widget.Button",
+                    isEditable = false
+                )
+                val match = nodeMatcher.findBestMatch(root, digitSpec, emptyMap())
                 if (match != null) {
                     val clicked = actionExecutor.click(match.node)
                     if (clicked) {
