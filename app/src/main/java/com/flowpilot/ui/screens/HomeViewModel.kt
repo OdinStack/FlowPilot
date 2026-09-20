@@ -6,8 +6,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.flowpilot.FlowPilotApp
 import com.flowpilot.accessibility.FlowPilotAccessibilityService
+import com.flowpilot.accessibility.SafetyDetector
+import com.flowpilot.accessibility.ScreenAnalyzer
 import com.flowpilot.ai.IntentResult
 import com.flowpilot.data.models.Workflow
+import com.flowpilot.data.repository.ExecutionLog
+import com.flowpilot.engine.ClarificationManager
+import com.flowpilot.engine.RecoveryManager
 import com.flowpilot.engine.ReplayEngine
 import com.flowpilot.engine.SystemMode
 import com.flowpilot.engine.SystemStateMachine
@@ -43,7 +48,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val stateMachine = SystemStateMachine()
     val voiceManager = VoiceManager(application)
     val teachingCoordinator = TeachingCoordinator(application, stateMachine)
-    val replayEngine = ReplayEngine(stateMachine = stateMachine)
+    private val recoveryManager = RecoveryManager(
+        screenAnalyzer = ScreenAnalyzer(),
+        safetyDetector = SafetyDetector(),
+        geminiClient = app.geminiClient,
+        serviceProvider = { FlowPilotAccessibilityService.instance }
+    )
+    val replayEngine = ReplayEngine(stateMachine = stateMachine, recoveryManager = recoveryManager)
+    private val clarificationManager = ClarificationManager(app.intentProcessor, voiceManager)
 
     val systemState = stateMachine.state
     val voiceState = voiceManager.voiceState
@@ -141,7 +153,32 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            val startTime = System.currentTimeMillis()
             val result = replayEngine.execute(workflow, slotValues)
+
+            // Log the execution to database
+            val stepDetails = result.stepResults.map { sr ->
+                val emoji = if (sr.success) "✅" else "❌"
+                val durationStr = "${"%.1f".format(sr.durationMs / 1000.0)}s"
+                "$emoji Step ${sr.stepIndex + 1}: ${sr.action} — ${sr.details} ($durationStr)"
+            }
+            try {
+                app.repository.logExecution(ExecutionLog(
+                    workflowId = workflow.id,
+                    workflowName = workflow.name,
+                    startedAt = startTime,
+                    completedAt = System.currentTimeMillis(),
+                    success = result.success,
+                    stoppedAtStep = if (!result.success) result.stepsCompleted else null,
+                    stopReason = result.stopReason,
+                    stepsCompleted = result.stepsCompleted,
+                    totalSteps = result.totalSteps,
+                    details = stepDetails
+                ))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to log execution", e)
+            }
+
             viewModelScope.launch(Dispatchers.Main) {
                 if (result.success) {
                     _replayFailure.value = null
@@ -237,10 +274,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
                 stateMachine.transition(SystemMode.CLARIFYING, "Missing info for ${flow.name}")
 
-                val question = app.intentProcessor.generateClarificationQuestion(flow, missing.first())
-                voiceManager.speak(question)
-                stateMachine.transition(SystemMode.IDLE, "Asked: $question")
-                // TODO: Listen for answer and re-process
+                // Ask for each missing slot and collect answers
+                val resolvedSlots = clarificationManager.resolveSlots(
+                    flow = flow,
+                    missingSlots = missing,
+                    existingSlots = emptyMap()
+                )
+
+                Log.i(TAG, "Clarification resolved slots: $resolvedSlots")
+                voiceManager.speak("Got it! Executing ${flow.name}.")
+                replayWorkflow(flow, resolvedSlots)
             }
 
             is IntentResult.Unknown -> {

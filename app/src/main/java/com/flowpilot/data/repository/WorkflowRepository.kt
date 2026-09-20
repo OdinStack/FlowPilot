@@ -89,6 +89,14 @@ class WorkflowRepository(private val dao: WorkflowDao) {
         return dao.getLastLog()?.toExecutionLog()
     }
 
+    fun getRecentLogs(): Flow<List<ExecutionLog>> {
+        return dao.getRecentLogs().map { entities ->
+            entities.mapNotNull { entity ->
+                try { entity.toExecutionLog() } catch (e: Exception) { null }
+            }
+        }
+    }
+
     // Conversion helpers
     private fun WorkflowEntity.toWorkflow(): Workflow? {
         return try {

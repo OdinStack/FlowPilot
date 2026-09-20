@@ -10,7 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -25,9 +25,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.flowpilot.ui.screens.DebugScreen
 import com.flowpilot.ui.screens.HomeScreen
 import com.flowpilot.ui.screens.HomeViewModel
+import com.flowpilot.ui.screens.LogScreen
+import com.flowpilot.ui.screens.LogViewModel
 import com.flowpilot.ui.theme.FlowPilotTheme
 
 class MainActivity : ComponentActivity() {
@@ -62,8 +63,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun FlowPilotNavigation() {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Home", "Debug")
+    val tabs = listOf("Home", "Logs")
     val homeViewModel: HomeViewModel = viewModel()
+    val logViewModel: LogViewModel = viewModel()
 
     Scaffold(
         bottomBar = {
@@ -74,7 +76,7 @@ fun FlowPilotNavigation() {
                             Icon(
                                 imageVector = when (index) {
                                     0 -> Icons.Default.Home
-                                    else -> Icons.Default.BugReport
+                                    else -> Icons.Default.History
                                 },
                                 contentDescription = title
                             )
@@ -92,7 +94,10 @@ fun FlowPilotNavigation() {
                 viewModel = homeViewModel,
                 modifier = Modifier.fillMaxSize().padding(paddingValues)
             )
-            1 -> DebugScreen(modifier = Modifier.fillMaxSize().padding(paddingValues))
+            1 -> LogScreen(
+                viewModel = logViewModel,
+                modifier = Modifier.fillMaxSize().padding(paddingValues)
+            )
         }
     }
 }

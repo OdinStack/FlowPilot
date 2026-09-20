@@ -19,7 +19,8 @@ class ReplayEngine(
     private val nodeMatcher: NodeMatcher = NodeMatcher(),
     private val safetyDetector: SafetyDetector = SafetyDetector(),
     private val screenAnalyzer: ScreenAnalyzer = ScreenAnalyzer(),
-    private val stateMachine: SystemStateMachine
+    private val stateMachine: SystemStateMachine,
+    private val recoveryManager: RecoveryManager? = null
 ) {
 
     companion object {
@@ -148,14 +149,85 @@ class ReplayEngine(
                 }
             }
 
-            // ─── EXECUTE STEP ───
-            val stepResult = executeStep(service, actionExecutor, workflow, step, effectiveSlots)
-            val duration = System.currentTimeMillis() - startTime
-            val finalStepResult = stepResult.copy(durationMs = duration)
+            // ─── EXECUTE STEP WITH RECOVERY ───
+            var stepResult: StepResult? = null
+            val maxAttempts = if (recoveryManager != null) RecoveryManager.MAX_RECOVERY_ATTEMPTS else 1
+
+            for (attempt in 1..maxAttempts) {
+                val result = executeStep(service, actionExecutor, workflow, step, effectiveSlots)
+                val duration = System.currentTimeMillis() - startTime
+                val finalResult = result.copy(durationMs = duration)
+
+                if (finalResult.success) {
+                    stepResult = finalResult
+                    break
+                }
+
+                // If no recovery manager, fail immediately
+                if (recoveryManager == null || attempt == maxAttempts) {
+                    // On last attempt, try to generate a helpful stuck question
+                    if (recoveryManager != null) {
+                        try {
+                            val root = service.rootInActiveWindow
+                            if (root != null) {
+                                val question = recoveryManager.generateStuckQuestion(root, step, effectiveSlots)
+                                Log.w(TAG, "Genuinely stuck: $question")
+                                // Store the question in the step details for the UI
+                                stepResult = finalResult.copy(details = "${finalResult.details} | Help: $question")
+                            } else {
+                                stepResult = finalResult
+                            }
+                        } catch (e: Exception) {
+                            stepResult = finalResult
+                        }
+                    } else {
+                        stepResult = finalResult
+                    }
+                    break
+                }
+
+                // Ask RecoveryManager what to do
+                Log.i(TAG, "Step ${step.index} failed (attempt $attempt/$maxAttempts). Consulting RecoveryManager...")
+                val recoveryAction = recoveryManager.analyzeAndRecover(step, attempt, effectiveSlots)
+
+                when (recoveryAction) {
+                    is RecoveryManager.RecoveryAction.RetryStep,
+                    is RecoveryManager.RecoveryAction.DismissAndRetry -> {
+                        delay(1000)
+                        continue
+                    }
+                    is RecoveryManager.RecoveryAction.CredentialStop -> {
+                        stepResults.add(StepResult(
+                            stepIndex = step.index,
+                            success = true,
+                            action = step.type.name,
+                            details = "Stopped at credential boundary during recovery",
+                            durationMs = System.currentTimeMillis() - startTime
+                        ))
+                        return ReplayResult(
+                            success = true,
+                            stepsCompleted = step.index,
+                            totalSteps = workflow.steps.size,
+                            stopReason = "Credential/payment boundary reached",
+                            stepResults = stepResults
+                        )
+                    }
+                    is RecoveryManager.RecoveryAction.AskUser -> {
+                        stepResult = finalResult.copy(details = "${finalResult.details} | Help: ${recoveryAction.question}")
+                        break // Exit retry loop — report failure with the question
+                    }
+                    is RecoveryManager.RecoveryAction.Abort -> {
+                        stepResult = finalResult.copy(details = recoveryAction.reason)
+                        break
+                    }
+                }
+            }
+
+            val finalStepResult = stepResult!!
             stepResults.add(finalStepResult)
 
             if (!finalStepResult.success) {
-                Log.e(TAG, "Step ${step.index} failed: ${finalStepResult.details}")
+                Log.e(TAG, "Step ${step.index} failed after $maxAttempts attempts: ${finalStepResult.details}")
                 stateMachine.setError("Failed at step ${step.index + 1}: ${finalStepResult.details}")
                 return ReplayResult(
                     success = false,
