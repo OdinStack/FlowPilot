@@ -102,20 +102,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onMicTapped() {
         val currentVoiceState = voiceState.value
-        if (currentVoiceState is VoiceState.Listening) {
-            voiceManager.stop()
-            return
-        }
 
         val deferred = clarificationDeferred
         if (deferred != null && !deferred.isCompleted) {
-            // We're waiting for a clarification answer — listen and feed it to the deferred
-            viewModelScope.launch(Dispatchers.Main) {
-                val result = voiceManager.listen()
-                if (!result.isNullOrBlank() && !deferred.isCompleted) {
-                    deferred.complete(result.trim().normalizeNumberWords())
+            // In clarification mode: toggle mic if listening, or start listening if idle
+            if (currentVoiceState is VoiceState.Listening) {
+                voiceManager.stop()
+            } else {
+                viewModelScope.launch(Dispatchers.Main) {
+                    val result = voiceManager.listen()
+                    if (!result.isNullOrBlank() && !deferred.isCompleted) {
+                        deferred.complete(result.trim().normalizeNumberWords())
+                    }
                 }
             }
+            return
+        }
+
+        if (currentVoiceState is VoiceState.Listening) {
+            voiceManager.stop()
             return
         }
 
@@ -343,23 +348,29 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val deferred = CompletableDeferred<String?>()
             clarificationDeferred = deferred
 
-            // Start voice listening in background — it will complete the deferred when done
+            // Start voice listening in background — loop so brief silences don't shut off the mic
             val listenJob = viewModelScope.launch(Dispatchers.Main) {
-                val voiceResult = voiceManager.listen()
-                if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
-                    deferred.complete(voiceResult.trim().normalizeNumberWords())
-                } else if (!deferred.isCompleted) {
-                    // Voice returned nothing, but keep waiting for user to either type or tap mic!
-                    // Wait up to 30 seconds for user input before timing out
-                    delay(30_000L)
-                    if (!deferred.isCompleted) {
-                        deferred.complete(null)
+                while (!deferred.isCompleted) {
+                    val voiceResult = voiceManager.listen()
+                    if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
+                        deferred.complete(voiceResult.trim().normalizeNumberWords())
+                        break
                     }
+                    delay(300)
+                }
+            }
+
+            // Overall safety timeout of 45 seconds to answer via voice or text
+            val timeoutJob = viewModelScope.launch {
+                delay(45_000L)
+                if (!deferred.isCompleted) {
+                    deferred.complete(null)
                 }
             }
 
             // Wait for answer from EITHER voice or text
             val answer = deferred.await()
+            timeoutJob.cancel()
             listenJob.cancel()
             voiceManager.stop()
             clarificationDeferred = null

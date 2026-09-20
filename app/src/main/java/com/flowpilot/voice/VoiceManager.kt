@@ -82,9 +82,14 @@ class VoiceManager(private val context: Context) {
                     RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                 )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                val lang = Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() } ?: "en-US"
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
             }
 
             recognizer.setRecognitionListener(object : RecognitionListener {
@@ -110,11 +115,11 @@ class VoiceManager(private val context: Context) {
                 }
 
                 override fun onResults(results: Bundle?) {
-                    val text = results
+                    val matches = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
+                    val text = matches?.firstOrNull()
 
-                    Log.i(TAG, "Speech result: \"$text\"")
+                    Log.i(TAG, "Speech results candidates: $matches")
                     if (!text.isNullOrBlank()) {
                         _voiceState.value = VoiceState.Result(text)
                     } else {
