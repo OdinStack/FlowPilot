@@ -24,28 +24,18 @@ class GeminiClient(private val apiKey: String) {
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    // Long-timeout client for heavy prompts (workflow synthesis with many actions)
-    private val heavyClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
-
     private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"
     private val candidateModels = listOf("gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash")
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
      * Send a prompt to Gemini and get a text response, with fallback model support.
-     * @param heavyPrompt Use longer timeout client (for synthesis of many actions).
      */
     suspend fun generate(
         systemPrompt: String,
         userPrompt: String,
-        jsonMode: Boolean = false,
-        heavyPrompt: Boolean = false
+        jsonMode: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
-        val httpClient = if (heavyPrompt) heavyClient else client
         val requestBody = buildJsonObject {
             put("system_instruction", buildJsonObject {
                 putJsonArray("parts") {
@@ -77,7 +67,7 @@ class GeminiClient(private val apiKey: String) {
                     .post(bodyContent.toRequestBody(mediaType))
                     .build()
 
-                val response = httpClient.newCall(request).execute()
+                val response = client.newCall(request).execute()
                 val body = response.body?.string()
 
                 if (!response.isSuccessful) {
