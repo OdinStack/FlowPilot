@@ -91,7 +91,8 @@ IMPORTANT:
         val response = gemini.generate(
             systemPrompt = SYNTHESIS_SYSTEM_PROMPT,
             userPrompt = prompt,
-            jsonMode = true
+            jsonMode = true,
+            heavyPrompt = true
         )
 
         if (response == null) {
