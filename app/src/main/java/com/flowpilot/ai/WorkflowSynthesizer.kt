@@ -74,6 +74,8 @@ IMPORTANT:
 - Mark the last step as is_credential_boundary: true if it leads to payment/login
 - Don't include app-opening as a step if the user was already in the app
 - Include scroll_to_find: true for steps where the target might be below the visible area
+- For main search bars with rotating promotional text (like 'Search "sweet cravings"' or 'Search "light meals"'), DO NOT put the rotating phrase in target.text; instead set target.text = null, target.text_contains = "Search", and target.semantic = "restaurant or product search bar".
+- If the user selected a saved delivery address (like "Home" or "Work" on a "Select a saved address" prompt), parameterize it with slot "address" (default_value: "Home", is_required: false) and set target.semantic = "saved delivery address". Never confuse a delivery location field ("Search location manually") with a restaurant/product search bar.
 - type field MUST be one of: OPEN_APP, CLICK, TYPE, SCROLL, FIND_AND_CLICK, CONDITIONAL, BACK
 """
     }

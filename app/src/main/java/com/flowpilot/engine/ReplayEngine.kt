@@ -91,11 +91,10 @@ class ReplayEngine(
         val firstStepIsOpenApp = workflow.steps.firstOrNull()?.type == StepType.OPEN_APP
 
         if (targetPkg.isNotBlank() && !firstStepIsOpenApp) {
-            // Always re-launch the app to ensure it starts from its home/root screen.
-            // FLAG_ACTIVITY_CLEAR_TASK in ActionExecutor.openApp() resets the activity stack.
-            Log.w(TAG, "Launching target app '$targetPkg' fresh (clearing activity stack)...")
+            Log.w(TAG, "Launching target app '$targetPkg' and ensuring clean home state...")
             stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
             launchAndWaitForApp(service, actionExecutor, targetPkg)
+            resolveLocationGatekeeperIfPresent(service, actionExecutor, effectiveSlots)
         }
 
         for (step in workflow.steps) {
@@ -103,6 +102,9 @@ class ReplayEngine(
             stateMachine.updateStep(step.index, workflow.steps.size, stepDesc)
 
             val startTime = System.currentTimeMillis()
+
+            // ─── PRE-CHECK: Resolve Location / Saved Address Gatekeeper (Approach 2) ───
+            resolveLocationGatekeeperIfPresent(service, actionExecutor, effectiveSlots)
 
             // ─── PRE-CHECK: Safety (Credential/Payment) ───
             val currentRoot = service.rootInActiveWindow
@@ -1164,17 +1166,17 @@ class ReplayEngine(
         val response = try {
             gemini.generate(
                 systemPrompt = """
-You are a UI element mapper. Given a workflow step designed for one app and 
-the current UI elements on screen, find the equivalent UI element.
-
-The workflow may have been learned on a different app. Map the abstract semantic 
-action to the correct UI element on the current screen.
+You are an intelligent mobile UI grounding agent. Given a workflow step and the current UI elements on screen:
+1. NEVER map a restaurant, food, dish, or product search step to a delivery address or location search box (such as "Search location manually" or "Select a location").
+2. If the current screen is showing a prerequisite prompt (such as "Select a saved address" with a saved address like "Home" or a close button "×"), select the saved address ("Home") or close button ("×") and set "is_prerequisite": true so the app can advance to the main screen.
+3. Otherwise, find the UI element that fulfills the workflow step's semantic role.
 
 Return JSON:
 {
-  "found": true/false,
-  "element_index": -1,
-  "confidence": 0.0-1.0,
+  "found": true,
+  "is_prerequisite": false,
+  "element_index": 0,
+  "confidence": 0.9,
   "reasoning": "why this element matches"
 }
 
@@ -1189,7 +1191,7 @@ $elementsDesc
 
 Slot values: $slots
 
-Which element corresponds to this workflow step? Return JSON.
+Which element corresponds to this workflow step (or prerequisite action)? Return JSON.
                 """.trimIndent(),
                 jsonMode = true
             )
@@ -1212,17 +1214,92 @@ Which element corresponds to this workflow step? Return JSON.
             val found = obj["found"]?.jsonPrimitive?.booleanOrNull ?: false
             if (!found) return null
 
+            val isPrerequisite = obj["is_prerequisite"]?.jsonPrimitive?.booleanOrNull ?: false
             val elementIndex = obj["element_index"]?.jsonPrimitive?.intOrNull ?: return null
             val confidence = obj["confidence"]?.jsonPrimitive?.floatOrNull ?: 0f
 
             if (confidence < 0.7f || elementIndex < 0 || elementIndex >= elements.size) return null
 
             val reasoning = obj["reasoning"]?.jsonPrimitive?.contentOrNull ?: ""
-            Log.i(TAG, "Cross-app mapping: found element[$elementIndex] confidence=$confidence reason='$reasoning'")
+            Log.i(TAG, "LLM Grounding: found element[$elementIndex] prerequisite=$isPrerequisite confidence=$confidence reason='$reasoning'")
+
+            if (isPrerequisite) {
+                // Click prerequisite element (e.g. "Home" saved address), wait for screen transition, then re-match
+                service.actionExecutor.click(elements[elementIndex])
+                delay(1200)
+                val nextRoot = service.rootInActiveWindow ?: return null
+                return nodeMatcher.findBestMatch(nextRoot, step.target, slots)?.node
+            }
+
             elements[elementIndex]
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse cross-app mapping response", e)
             null
+        }
+    }
+
+    /**
+     * Approach 2: Autonomous Location / Saved Address Gatekeeper Resolver.
+     * Detects when an app (Zomato, Swiggy, Blinkit, Zepto, Amazon, Flipkart) opens with
+     * a "Select a saved address" / "Device location not enabled" modal or "Select a location"
+     * screen, and automatically selects the user's saved address ("Home" or slot["address"]).
+     */
+    private suspend fun resolveLocationGatekeeperIfPresent(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor,
+        slots: Map<String, String>
+    ) {
+        try {
+            var root = service.rootInActiveWindow ?: return
+
+            // 1. If stuck on "Select a location" manual location sub-screen, press Back first
+            if (screenAnalyzer.isSelectLocationSubScreen(root)) {
+                Log.w(TAG, "Detected 'Select a location' sub-screen! Pressing Back to return to saved addresses...")
+                actionExecutor.pressBack()
+                delay(900)
+                root = service.rootInActiveWindow ?: return
+            }
+
+            // 2. If showing "Select a saved address" / "Device location not enabled" bottom sheet
+            if (screenAnalyzer.isLocationGatekeeperScreen(root)) {
+                val preferredAddr = slots["address"] ?: slots["delivery_address"] ?: "Home"
+                Log.i(TAG, "Location Gatekeeper detected! Searching for saved address '$preferredAddr'...")
+                val savedAddressNode = screenAnalyzer.findSavedAddressNode(root, preferredAddr)
+                if (savedAddressNode != null) {
+                    Log.i(TAG, "Clicking saved address '$preferredAddr' on Location Gatekeeper sheet...")
+                    stateMachine.transition(SystemMode.REPLAYING, "Selecting saved address ($preferredAddr)...")
+                    actionExecutor.click(savedAddressNode)
+                    delay(1200)
+                    return
+                }
+
+                // Fallback: click the dismiss '×' button above the bottom sheet
+                val dismissBtn = screenAnalyzer.findDismissButton(root)
+                if (dismissBtn != null) {
+                    Log.i(TAG, "Dismissing Location Gatekeeper sheet via close button...")
+                    actionExecutor.click(dismissBtn)
+                    delay(900)
+                }
+
+                // Approach 4: Interactive Co-Pilot Handoff — if still on Location Gatekeeper,
+                // let the user tap their saved address and auto-resume immediately once cleared!
+                val checkRoot = service.rootInActiveWindow
+                if (checkRoot != null && (screenAnalyzer.isLocationGatekeeperScreen(checkRoot) || screenAnalyzer.isSelectLocationSubScreen(checkRoot))) {
+                    Log.i(TAG, "Interactive Co-Pilot: waiting up to 8s for user to select delivery address...")
+                    stateMachine.transition(SystemMode.REPLAYING, "Tap your saved address (e.g. Home) — I'll continue automatically!")
+                    for (waitTick in 1..16) {
+                        delay(500)
+                        val r = service.rootInActiveWindow ?: break
+                        if (!screenAnalyzer.isLocationGatekeeperScreen(r) && !screenAnalyzer.isSelectLocationSubScreen(r)) {
+                            Log.i(TAG, "User selected delivery address! Auto-resuming workflow replay.")
+                            delay(600)
+                            break
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error resolving location gatekeeper", e)
         }
     }
 
