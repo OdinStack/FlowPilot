@@ -232,7 +232,7 @@ class ActionExecutor(private val service: AccessibilityService) {
             }
 
             if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
 
                 // 1. Try launching via current foreground Activity (bypasses all background activity restrictions)
                 val currentActivity = com.flowpilot.FlowPilotApp.currentActivity

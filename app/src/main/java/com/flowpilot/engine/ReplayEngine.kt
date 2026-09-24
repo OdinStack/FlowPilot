@@ -8,13 +8,17 @@ import com.flowpilot.accessibility.FlowPilotAccessibilityService
 import com.flowpilot.accessibility.NodeMatcher
 import com.flowpilot.accessibility.SafetyDetector
 import com.flowpilot.accessibility.ScreenAnalyzer
+import com.flowpilot.ai.GeminiClient
 import com.flowpilot.data.models.StepType
 import com.flowpilot.data.models.TargetSpec
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.data.models.WorkflowStep
 import com.flowpilot.util.Constants
+import com.flowpilot.util.describe
 import com.flowpilot.util.normalizeNumberWords
+import com.flowpilot.util.operationToCalculatorTarget
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.*
 
 class ReplayEngine(
     private val serviceProvider: () -> FlowPilotAccessibilityService? = { FlowPilotAccessibilityService.instance },
@@ -22,7 +26,8 @@ class ReplayEngine(
     private val safetyDetector: SafetyDetector = SafetyDetector(),
     private val screenAnalyzer: ScreenAnalyzer = ScreenAnalyzer(),
     private val stateMachine: SystemStateMachine,
-    private val recoveryManager: RecoveryManager? = null
+    private val recoveryManager: RecoveryManager? = null,
+    private val geminiClient: GeminiClient? = null
 ) {
 
     companion object {
@@ -86,12 +91,11 @@ class ReplayEngine(
         val firstStepIsOpenApp = workflow.steps.firstOrNull()?.type == StepType.OPEN_APP
 
         if (targetPkg.isNotBlank() && !firstStepIsOpenApp) {
-            val currentPkg = service.rootInActiveWindow?.packageName?.toString() ?: ""
-            if (!isPackageInForeground(currentPkg, targetPkg)) {
-                Log.w(TAG, "Target app '$targetPkg' not in foreground (current: '$currentPkg'). Launching...")
-                stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
-                launchAndWaitForApp(service, actionExecutor, targetPkg)
-            }
+            // Always re-launch the app to ensure it starts from its home/root screen.
+            // FLAG_ACTIVITY_CLEAR_TASK in ActionExecutor.openApp() resets the activity stack.
+            Log.w(TAG, "Launching target app '$targetPkg' fresh (clearing activity stack)...")
+            stateMachine.transition(SystemMode.REPLAYING, "Opening ${targetPkg.substringAfterLast('.')}...")
+            launchAndWaitForApp(service, actionExecutor, targetPkg)
         }
 
         for (step in workflow.steps) {
@@ -116,6 +120,24 @@ class ReplayEngine(
                     }
 
                     Log.w(TAG, "Safety boundary detected at step ${step.index}: $reason")
+
+                    // Before stopping, handle address change if needed
+                    val addressSlot = effectiveSlots["address"] ?: effectiveSlots["delivery_address"]
+                    if (!addressSlot.isNullOrBlank()) {
+                        val defaultAddr = workflow.slots["address"]?.defaultValue
+                            ?: workflow.slots["delivery_address"]?.defaultValue
+                        if (defaultAddr == null || !addressSlot.equals(defaultAddr, ignoreCase = true)) {
+                            Log.i(TAG, "Attempting address change to '$addressSlot' before credential boundary...")
+                            val addrResult = handleAddressChange(service, actionExecutor, addressSlot)
+                            stepResults.add(addrResult)
+                            if (addrResult.success) {
+                                Log.i(TAG, "Address changed successfully to '$addressSlot'")
+                            } else {
+                                Log.w(TAG, "Address change failed: ${addrResult.details}")
+                            }
+                        }
+                    }
+
                     stateMachine.transition(SystemMode.PAUSED, "Payment/login screen reached. Your turn!")
 
                     stepResults.add(
@@ -156,7 +178,8 @@ class ReplayEngine(
             val maxAttempts = if (recoveryManager != null) RecoveryManager.MAX_RECOVERY_ATTEMPTS else 1
 
             for (attempt in 1..maxAttempts) {
-                val result = executeStep(service, actionExecutor, workflow, step, effectiveSlots)
+                val remappedStep = remapOperatorStep(step, effectiveSlots)
+                val result = executeStep(service, actionExecutor, workflow, remappedStep, effectiveSlots)
                 val duration = System.currentTimeMillis() - startTime
                 val finalResult = result.copy(durationMs = duration)
 
@@ -238,6 +261,17 @@ class ReplayEngine(
                     stopReason = finalStepResult.details,
                     stepResults = stepResults
                 )
+            }
+
+            // ─── POST-STEP: Quantity Increment ───
+            if (finalStepResult.success && isAddToCartStep(step)) {
+                val qtyResult = handleQuantityIncrement(service, actionExecutor, effectiveSlots)
+                if (qtyResult.success && qtyResult.details != "No quantity > 1" && qtyResult.details != "Default quantity (1)") {
+                    stepResults.add(qtyResult)
+                    Log.i(TAG, "Quantity handled: ${qtyResult.details}")
+                } else if (!qtyResult.success) {
+                    Log.w(TAG, "Quantity increment failed: ${qtyResult.details}")
+                }
             }
 
             // Settle delay between steps for UI animations
@@ -552,6 +586,18 @@ class ReplayEngine(
             delay(500)
         }
 
+        // ─── LAST RESORT: Cross-app LLM element mapping ───
+        if (geminiClient != null) {
+            Log.i(TAG, "Attempting cross-app LLM element mapping for step: ${step.description}")
+            val llmNode = crossAppElementMapping(service, step, slots)
+            if (llmNode != null) {
+                val success = action(llmNode)
+                if (success) {
+                    return StepResult(step.index, true, actionName, "Found via LLM cross-app mapping", 0)
+                }
+            }
+        }
+
         return StepResult(step.index, false, actionName, lastError, 0)
     }
 
@@ -695,6 +741,49 @@ class ReplayEngine(
         }
     }
 
+    // ─── Operator Remapping ───
+
+    /**
+     * If this step targets a calculator operator button (op_add, op_sub, op_mul, op_div)
+     * and an "operation" slot is present, remap the step's target to match the requested operation.
+     * This allows a workflow taught with "add" to dynamically work for multiply/subtract/divide.
+     */
+    private fun remapOperatorStep(step: WorkflowStep, slots: Map<String, String>): WorkflowStep {
+        val operation = slots["operation"] ?: return step
+        if (step.type != StepType.CLICK) return step
+
+        val resId = step.target.resourceId ?: ""
+        val desc = step.target.contentDescription ?: ""
+
+        // Check if this step targets any calculator operator button
+        val operatorPatterns = listOf("op_add", "op_sub", "op_mul", "op_div")
+        val operatorDescs = listOf("add", "subtract", "multiply", "divide", "plus", "minus", "times")
+        val isOperatorStep = operatorPatterns.any { resId.contains(it, ignoreCase = true) } ||
+                             operatorDescs.any { desc.equals(it, ignoreCase = true) }
+
+        if (!isOperatorStep) return step
+
+        val mapping = operationToCalculatorTarget(operation) ?: return step
+        val (newResIdSuffix, newDesc) = mapping
+
+        // Build new resource ID maintaining the package prefix (e.g. com.coloros.calculator:id/op_mul)
+        val newResId = if (resId.contains(":id/")) {
+            resId.substringBefore(":id/") + ":id/" + newResIdSuffix
+        } else {
+            newResIdSuffix
+        }
+
+        Log.i(TAG, "Remapping operator step: $resId -> $newResId, '$desc' -> '$newDesc' (operation=$operation)")
+
+        return step.copy(
+            target = step.target.copy(
+                resourceId = newResId,
+                contentDescription = newDesc
+            ),
+            description = "Click the $operation operator"
+        )
+    }
+
     // ─── Shared Helpers ───
 
     /** Extract the meaningful token from a package name for fuzzy matching. */
@@ -736,5 +825,430 @@ class ReplayEngine(
         }
         Log.w(TAG, "Target app '$targetPkg' did not appear in foreground within timeout")
         return true // App was launched, just couldn't confirm foreground
+    }
+
+    // ─── Phase 10: Quantity Handling ───
+
+    /**
+     * Detect if a step is an "add to cart" / "add to bag" action.
+     * Uses semantic, description, text, and contentDescription heuristics.
+     */
+    private fun isAddToCartStep(step: WorkflowStep): Boolean {
+        val desc = step.description.lowercase()
+        val semantic = step.target.semantic?.lowercase() ?: ""
+        val text = step.target.text?.lowercase() ?: ""
+        val textContains = step.target.textContains?.lowercase() ?: ""
+        val contentDesc = step.target.contentDescription?.lowercase() ?: ""
+        val resId = step.target.resourceId?.lowercase() ?: ""
+
+        val addPhrases = listOf("add to cart", "add to bag", "add to basket", "add item",
+            "add to order", "buy now")
+        val addKeywords = listOf("add", "buy now")
+
+        // Check full phrases first (more specific)
+        if (addPhrases.any { p -> desc.contains(p) || semantic.contains(p) || text.contains(p) || contentDesc.contains(p) }) {
+            return true
+        }
+        // Check keywords in text/desc (exact match to avoid false positives like "Add address")
+        if (addKeywords.any { k -> text == k || contentDesc == k || textContains == k }) {
+            return true
+        }
+        // Check resourceId patterns
+        if (resId.contains("add_to_cart") || resId.contains("add_to_bag") ||
+            resId.contains("btn_add") || resId.contains("add_item")) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * After an "add to cart" action, if quantity > 1, find the increment (+) button
+     * and click it (quantity - 1) times. Works generically across apps by searching for
+     * common increment button patterns.
+     */
+    private suspend fun handleQuantityIncrement(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor,
+        slots: Map<String, String>
+    ): StepResult {
+        val quantityStr = slots["quantity"] ?: slots["count"] ?: slots["qty"]
+        val quantity = quantityStr?.toIntOrNull()
+            ?: return StepResult(-1, true, "QUANTITY", "No quantity > 1", 0)
+
+        if (quantity <= 1) return StepResult(-1, true, "QUANTITY", "Default quantity (1)", 0)
+
+        Log.i(TAG, "Quantity=$quantity requested. Looking for increment button...")
+        delay(800) // Wait for cart UI to update
+
+        val root = service.rootInActiveWindow
+            ?: return StepResult(-1, false, "QUANTITY", "No window available", 0)
+
+        // Strategy 1: Try TargetSpec-based matching via NodeMatcher
+        val incrementSpecs = listOf(
+            TargetSpec(text = "+", semantic = "quantity increment"),
+            TargetSpec(text = "＋", semantic = "quantity increment"),
+            TargetSpec(contentDescription = "Increase", semantic = "quantity increment"),
+            TargetSpec(contentDescription = "Increase quantity", semantic = "quantity increment"),
+            TargetSpec(contentDescription = "increment", semantic = "quantity increment")
+        )
+
+        var plusNode: AccessibilityNodeInfo? = null
+        for (spec in incrementSpecs) {
+            val match = nodeMatcher.findBestMatch(root, spec, slots)
+            if (match != null) {
+                plusNode = match.node
+                Log.i(TAG, "Found increment button via NodeMatcher: ${match.matchDetails}")
+                break
+            }
+        }
+
+        // Strategy 2: Deep tree traversal for increment controls
+        if (plusNode == null) {
+            plusNode = findIncrementButton(root)
+            if (plusNode != null) {
+                Log.i(TAG, "Found increment button via tree traversal")
+            }
+        }
+
+        if (plusNode == null) {
+            Log.w(TAG, "Could not find quantity increment button")
+            return StepResult(-1, false, "QUANTITY", "Could not find quantity increment button", 0)
+        }
+
+        Log.i(TAG, "Clicking increment button ${quantity - 1} times...")
+        repeat(quantity - 1) { i ->
+            actionExecutor.click(plusNode)
+            delay(400)
+            Log.d(TAG, "Quantity increment click ${i + 1}/${quantity - 1}")
+        }
+
+        return StepResult(-1, true, "QUANTITY", "Set quantity to $quantity", 0)
+    }
+
+    /**
+     * Traverses the UI tree to find an increment/plus button using common patterns
+     * across Zomato, Amazon, Flipkart, Myntra, and other e-commerce apps.
+     */
+    private fun findIncrementButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 25) return null
+            try {
+                if (node.isVisibleToUser && (node.isClickable || node.isEnabled)) {
+                    val text = node.text?.toString() ?: ""
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+
+                    // Text-based: exact "+" or "＋"
+                    if (text == "+" || text == "＋") return node
+
+                    // ContentDescription-based
+                    if (desc == "increase" || desc == "increment" || desc == "increase quantity" ||
+                        desc == "add quantity" || desc == "plus" || desc == "qty plus" ||
+                        desc.contains("increase") || desc.contains("increment")) {
+                        if (node.isClickable) return node
+                    }
+
+                    // ResourceId-based patterns (common across apps)
+                    if (resId.contains("plus") || resId.contains("increment") ||
+                        resId.contains("increase") || resId.contains("qty_add") ||
+                        resId.contains("qty_increase") || resId.contains("btn_plus") ||
+                        resId.contains("btn_increase") || resId.contains("qty_plus") ||
+                        resId.contains("add_qty") || resId.contains("quantity_add") ||
+                        resId.contains("stepper_plus") || resId.contains("counter_add")) {
+                        if (node.isClickable) return node
+                    }
+                }
+
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                }
+            } catch (e: Exception) {
+                // Stale node — safe to ignore
+            }
+            return null
+        }
+        return search(root, 0)
+    }
+
+    // ─── Phase 10: Address Handling ───
+
+    /**
+     * Handle delivery address change on checkout/cart screens.
+     * Uses generic heuristic patterns that work across Zomato, Amazon, Flipkart, Myntra:
+     * - Finds the address section by text patterns (deliver to, shipping address, etc.)
+     * - Clicks to open address picker
+     * - Finds and selects the target address option
+     */
+    private suspend fun handleAddressChange(
+        service: FlowPilotAccessibilityService,
+        actionExecutor: ActionExecutor,
+        targetAddress: String
+    ): StepResult {
+        val root = service.rootInActiveWindow
+            ?: return StepResult(-1, false, "ADDRESS", "No window available", 0)
+
+        Log.i(TAG, "Attempting to change address to '$targetAddress'")
+
+        // Strategy 1: Find address section by common text patterns
+        val addressPatterns = listOf(
+            "deliver to", "delivery address", "shipping to", "shipping address",
+            "delivering to", "selected address", "deliver here", "change address",
+            "select address", "delivery location"
+        )
+
+        var addressNode: AccessibilityNodeInfo? = null
+        for (pattern in addressPatterns) {
+            val spec = TargetSpec(textContains = pattern, semantic = "address selector")
+            val match = nodeMatcher.findBestMatch(root, spec, emptyMap())
+            if (match != null) {
+                addressNode = match.node
+                Log.i(TAG, "Found address section via pattern '$pattern': ${match.matchDetails}")
+                break
+            }
+        }
+
+        // Strategy 2: Look for current address labels (Home, Work, Office)
+        if (addressNode == null) {
+            val addressLabels = listOf("home", "work", "office", "other")
+            for (label in addressLabels) {
+                val spec = TargetSpec(text = label, semantic = "current address")
+                val match = nodeMatcher.findBestMatch(root, spec, emptyMap())
+                if (match != null && match.node.isClickable) {
+                    addressNode = match.node
+                    Log.i(TAG, "Found address label '$label': ${match.matchDetails}")
+                    break
+                }
+            }
+        }
+
+        // Strategy 3: Find by resourceId patterns
+        if (addressNode == null) {
+            addressNode = findAddressSection(root)
+        }
+
+        if (addressNode == null) {
+            return StepResult(-1, false, "ADDRESS", "Could not find address section on screen", 0)
+        }
+
+        // Click to open address picker
+        actionExecutor.click(addressNode)
+        delay(1500) // Wait for address list to load
+
+        // Find the target address option in the picker
+        val newRoot = service.rootInActiveWindow
+            ?: return StepResult(-1, false, "ADDRESS", "Lost window after opening address picker", 0)
+
+        // Search for the target address text
+        val targetSpec = TargetSpec(textContains = targetAddress, semantic = "target address option")
+        var targetMatch = nodeMatcher.findBestMatch(newRoot, targetSpec, emptyMap())
+
+        // Fallback: try case-insensitive broader search
+        if (targetMatch == null) {
+            targetMatch = findTextInTree(newRoot, targetAddress)?.let {
+                NodeMatcher.MatchResult(it, 0.7f, "Found '$targetAddress' in address list")
+            }
+        }
+
+        if (targetMatch == null) {
+            // Press back to close the picker
+            actionExecutor.pressBack()
+            delay(500)
+            return StepResult(-1, false, "ADDRESS", "Could not find address '$targetAddress' in picker", 0)
+        }
+
+        // Click the target address
+        actionExecutor.click(targetMatch.node)
+        delay(1000) // Wait for screen to return to checkout
+
+        Log.i(TAG, "Address changed to '$targetAddress'")
+        return StepResult(-1, true, "ADDRESS", "Changed address to $targetAddress", 0)
+    }
+
+    /**
+     * Find address section by resourceId patterns common in e-commerce apps.
+     */
+    private fun findAddressSection(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                if (node.isVisibleToUser) {
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+
+                    if (resId.contains("address") || resId.contains("delivery") ||
+                        resId.contains("location") || resId.contains("shipping") ||
+                        desc.contains("address") || desc.contains("delivery location") ||
+                        desc.contains("change address")) {
+                        if (node.isClickable) return node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                }
+            } catch (e: Exception) {}
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find a node containing specific text (case-insensitive) and return the nearest clickable parent.
+     */
+    private fun findTextInTree(root: AccessibilityNodeInfo, targetText: String): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 25) return null
+            try {
+                val text = node.text?.toString() ?: ""
+                val desc = node.contentDescription?.toString() ?: ""
+
+                if (text.contains(targetText, ignoreCase = true) ||
+                    desc.contains(targetText, ignoreCase = true)) {
+                    // Return this node if clickable, or walk up to find clickable parent
+                    if (node.isClickable) return node
+                    var parent = node.parent
+                    var parentDepth = 0
+                    while (parent != null && parentDepth < 5) {
+                        if (parent.isClickable) return parent
+                        parent = parent.parent
+                        parentDepth++
+                    }
+                    return node // Return even if not directly clickable
+                }
+
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                }
+            } catch (e: Exception) {}
+            return null
+        }
+        return search(root, 0)
+    }
+
+    // ─── Phase 11: Cross-App Generalization ───
+
+    /**
+     * Use LLM (Gemini) to map a workflow step's semantic description to a UI element
+     * on the current screen. This enables workflows taught on one app to work on
+     * a different app with similar UI patterns (e.g., search bar, add-to-cart button).
+     */
+    private suspend fun crossAppElementMapping(
+        service: FlowPilotAccessibilityService,
+        step: WorkflowStep,
+        slots: Map<String, String>
+    ): AccessibilityNodeInfo? {
+        val gemini = geminiClient ?: return null
+        val root = service.rootInActiveWindow ?: return null
+
+        val elements = collectVisibleElements(root)
+        if (elements.isEmpty()) return null
+
+        val elementsDesc = elements.mapIndexed { i, elem ->
+            "[$i] ${elem.describe()}"
+        }.joinToString("\n")
+
+        val stepDesc = buildString {
+            append("Action: ${step.type.name}\n")
+            step.target.semantic?.let { append("Semantic role: $it\n") }
+            step.target.text?.let { append("Original text: $it\n") }
+            step.target.textContains?.let { append("Text contains: $it\n") }
+            step.target.contentDescription?.let { append("Content description: $it\n") }
+            step.description.takeIf { it.isNotBlank() }?.let { append("Description: $it\n") }
+        }
+
+        val response = try {
+            gemini.generate(
+                systemPrompt = """
+You are a UI element mapper. Given a workflow step designed for one app and 
+the current UI elements on screen, find the equivalent UI element.
+
+The workflow may have been learned on a different app. Map the abstract semantic 
+action to the correct UI element on the current screen.
+
+Return JSON:
+{
+  "found": true/false,
+  "element_index": -1,
+  "confidence": 0.0-1.0,
+  "reasoning": "why this element matches"
+}
+
+Only return found=true if confidence >= 0.7.
+                """.trimIndent(),
+                userPrompt = """
+WORKFLOW STEP:
+$stepDesc
+
+CURRENT SCREEN visible elements:
+$elementsDesc
+
+Slot values: $slots
+
+Which element corresponds to this workflow step? Return JSON.
+                """.trimIndent(),
+                jsonMode = true
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Cross-app mapping LLM call failed", e)
+            return null
+        }
+
+        if (response == null) return null
+
+        return try {
+            val cleanJson = response.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            val json = Json { ignoreUnknownKeys = true; isLenient = true }
+            val obj = json.parseToJsonElement(cleanJson).jsonObject
+
+            val found = obj["found"]?.jsonPrimitive?.booleanOrNull ?: false
+            if (!found) return null
+
+            val elementIndex = obj["element_index"]?.jsonPrimitive?.intOrNull ?: return null
+            val confidence = obj["confidence"]?.jsonPrimitive?.floatOrNull ?: 0f
+
+            if (confidence < 0.7f || elementIndex < 0 || elementIndex >= elements.size) return null
+
+            val reasoning = obj["reasoning"]?.jsonPrimitive?.contentOrNull ?: ""
+            Log.i(TAG, "Cross-app mapping: found element[$elementIndex] confidence=$confidence reason='$reasoning'")
+            elements[elementIndex]
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse cross-app mapping response", e)
+            null
+        }
+    }
+
+    /**
+     * Collect all visible interactive elements from the UI tree.
+     * Returns at most 50 elements to keep LLM prompts manageable.
+     */
+    private fun collectVisibleElements(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val elements = mutableListOf<AccessibilityNodeInfo>()
+        fun traverse(node: AccessibilityNodeInfo, depth: Int) {
+            if (depth > 20 || elements.size >= 50) return
+            try {
+                if (node.isVisibleToUser &&
+                    (node.isClickable || node.isEditable || node.isScrollable ||
+                     !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank())) {
+                    elements.add(node)
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    traverse(child, depth + 1)
+                }
+            } catch (e: Exception) {
+                // Stale node — safe to ignore
+            }
+        }
+        traverse(root, 0)
+        return elements
     }
 }

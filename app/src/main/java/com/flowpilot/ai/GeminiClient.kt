@@ -23,9 +23,9 @@ class GeminiClient(
     }
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
     private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"

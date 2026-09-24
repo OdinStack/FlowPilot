@@ -177,7 +177,9 @@ fun HomeScreen(
     }
 
     Column(
-        modifier = modifier.padding(16.dp),
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Title
@@ -220,14 +222,14 @@ fun HomeScreen(
                     onSendCommand = { command ->
                         viewModel.submitTextCommand(command)
                     },
-                    onStopListening = { viewModel.voiceManager.stop() }
+                    onStopListening = { viewModel.onMicTapped() }
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Dynamic status text
+        // Dynamic status / error display
         val displayText = when (val vs = voiceState) {
             is VoiceState.Listening -> "Listening... Speak your command"
             is VoiceState.Partial -> "\u201c${vs.text}\u201d"
@@ -237,16 +239,55 @@ fun HomeScreen(
             is VoiceState.Idle -> systemState.message
         }
 
-        Text(
-            text = displayText,
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = if (isListening) FontWeight.SemiBold else FontWeight.Normal,
-            textAlign = TextAlign.Center,
-            color = if (voiceState is VoiceState.Error) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurface
-        )
+        val isError = voiceState is VoiceState.Error ||
+            (voiceState is VoiceState.Idle && (systemState.message.contains("Failed") || systemState.message.contains("❌") || systemState.message.contains("Error")))
 
-        Spacer(modifier = Modifier.height(12.dp))
+        if (isError && displayText.isNotBlank()) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = displayText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    IconButton(
+                        onClick = { viewModel.clearError() },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Dismiss error",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+        } else if (displayText.isNotBlank()) {
+            Text(
+                text = displayText,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = if (isListening) FontWeight.SemiBold else FontWeight.Normal,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Last synthesized workflow banner
         lastSynthesized?.let { workflow ->
@@ -270,7 +311,9 @@ fun HomeScreen(
             )
 
             LazyColumn(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(savedWorkflows, key = { it.id }) { workflow ->

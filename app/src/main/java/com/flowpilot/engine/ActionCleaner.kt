@@ -1,16 +1,20 @@
 package com.flowpilot.engine
 
+import android.util.Log
+import com.flowpilot.ai.GeminiClient
 import com.flowpilot.data.models.ActionType
 import com.flowpilot.data.models.RecordedAction
+import kotlinx.serialization.json.Json
 
 class ActionCleaner {
 
     companion object {
+        private const val TAG = "ActionCleaner"
         /**
-         * Maximum actions to send to Gemini for synthesis.
-         * More than this overflows the model's effective context and causes timeouts.
+         * Maximum actions to send to AI for synthesis.
+         * Groq/Gemini can handle up to ~40 actions comfortably.
          */
-        private const val MAX_ACTIONS_FOR_SYNTHESIS = 25
+        private const val MAX_ACTIONS_FOR_SYNTHESIS = 40
     }
 
     /**
@@ -197,5 +201,78 @@ class ActionCleaner {
         val dirA = a.data["direction"] ?: "DOWN"
         val dirB = b.data["direction"] ?: "DOWN"
         return dirA == dirB
+    }
+
+    /**
+     * Use LLM to filter out irrelevant actions (accidental touches, phone calls,
+     * app switching, undo-redo scrolls, etc.) from the recorded action list.
+     * Falls back to returning the original actions if LLM fails.
+     */
+    suspend fun filterWithLLM(
+        actions: List<RecordedAction>,
+        utterance: String,
+        gemini: GeminiClient
+    ): List<RecordedAction> {
+        if (actions.size <= 3) return actions
+
+        val actionsDesc = actions.mapIndexed { i, a ->
+            "[$i] ${a.type.name}: ${a.targetNode?.text ?: a.targetNode?.contentDescription ?: "unknown"} in ${a.packageName}"
+        }.joinToString("\n")
+
+        val response = try {
+            gemini.generate(
+                systemPrompt = """
+You are analyzing a sequence of user actions recorded while they were teaching 
+a workflow on an Android phone. Given the intended task and the action list, identify which actions 
+are RELEVANT to the task and which are IRRELEVANT (accidental touches, 
+receiving a phone call, switching apps, undo-redo scrolls, duplicate taps, etc.).
+
+Return a JSON array of relevant action indices only.
+Example: [0, 1, 2, 4, 5, 7]
+                """.trimIndent(),
+                userPrompt = """
+Intended task: "$utterance"
+
+Actions:
+$actionsDesc
+
+Return the indices of relevant actions as a JSON array.
+                """.trimIndent(),
+                jsonMode = true
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "LLM filtering failed", e)
+            return actions
+        }
+
+        if (response == null) {
+            Log.w(TAG, "LLM filtering returned null, keeping all actions")
+            return actions
+        }
+
+        return try {
+            val cleanJson = response.trim()
+                .removePrefix("```json")
+                .removePrefix("```")
+                .removeSuffix("```")
+                .trim()
+            val json = Json { isLenient = true }
+            val relevantIndices = json.decodeFromString<List<Int>>(cleanJson)
+            val filtered = actions.filterIndexed { i, _ -> i in relevantIndices }
+            if (filtered.isEmpty()) {
+                Log.w(TAG, "LLM filter removed ALL actions, keeping originals")
+                actions
+            } else if (filtered.size < actions.size * 0.6) {
+                // Safety: if LLM removed more than 40%, it's too aggressive — keep originals
+                Log.w(TAG, "LLM filter too aggressive (kept ${filtered.size}/${actions.size}), keeping originals")
+                actions
+            } else {
+                Log.i(TAG, "LLM filter: kept ${filtered.size}/${actions.size} actions")
+                filtered.mapIndexed { idx, action -> action.copy(index = idx) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse LLM filter response: $response", e)
+            actions
+        }
     }
 }

@@ -12,6 +12,7 @@ import com.flowpilot.ai.IntentResult
 import com.flowpilot.data.models.Workflow
 import com.flowpilot.data.repository.ExecutionLog
 import com.flowpilot.engine.ClarificationManager
+import com.flowpilot.engine.ActionCleaner
 import com.flowpilot.engine.RecoveryManager
 import com.flowpilot.engine.ReplayEngine
 import com.flowpilot.engine.SystemMode
@@ -21,8 +22,10 @@ import com.flowpilot.engine.TeachingResult
 import com.flowpilot.voice.VoiceManager
 import com.flowpilot.voice.VoiceState
 import com.flowpilot.util.normalizeNumberWords
+import com.flowpilot.util.extractOperation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,7 +60,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         geminiClient = app.geminiClient,
         serviceProvider = { FlowPilotAccessibilityService.instance }
     )
-    val replayEngine = ReplayEngine(stateMachine = stateMachine, recoveryManager = recoveryManager)
+    val replayEngine = ReplayEngine(stateMachine = stateMachine, recoveryManager = recoveryManager, geminiClient = app.geminiClient)
     private val clarificationManager = ClarificationManager(app.intentProcessor)
 
     val systemState = stateMachine.state
@@ -77,6 +80,27 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     // Clarification answer bridge: both voice and text can complete this
     private var clarificationDeferred: CompletableDeferred<String?>? = null
+    private var clarificationListenJob: Job? = null
+
+    private fun startClarificationListening(deferred: CompletableDeferred<String?>) {
+        clarificationListenJob?.cancel()
+        clarificationListenJob = viewModelScope.launch(Dispatchers.Main) {
+            while (!deferred.isCompleted) {
+                val voiceResult = voiceManager.listen()
+                if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
+                    deferred.complete(voiceResult.trim().normalizeNumberWords())
+                    break
+                }
+                delay(300)
+            }
+        }
+    }
+
+    private fun stopClarificationListening() {
+        clarificationListenJob?.cancel()
+        clarificationListenJob = null
+        voiceManager.stop()
+    }
 
     fun clearLastTeachingResult() {
         _lastTeachingResult.value = null
@@ -105,16 +129,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         val deferred = clarificationDeferred
         if (deferred != null && !deferred.isCompleted) {
-            // In clarification mode: toggle mic if listening, or start listening if idle
+            // In clarification mode: toggle mic cleanly without multiple concurrent listeners
             if (currentVoiceState is VoiceState.Listening) {
-                voiceManager.stop()
+                stopClarificationListening()
             } else {
-                viewModelScope.launch(Dispatchers.Main) {
-                    val result = voiceManager.listen()
-                    if (!result.isNullOrBlank() && !deferred.isCompleted) {
-                        deferred.complete(result.trim().normalizeNumberWords())
-                    }
-                }
+                startClarificationListening(deferred)
             }
             return
         }
@@ -155,6 +174,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissReplayFailure() {
         _replayFailure.value = null
+    }
+
+    fun clearError() {
+        stateMachine.reset()
     }
 
     fun retryFailedWorkflow() {
@@ -245,7 +268,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // If we're waiting for a clarification answer, feed it to the deferred
         val deferred = clarificationDeferred
         if (deferred != null && !deferred.isCompleted) {
-            voiceManager.stop() // Stop listening if active
+            stopClarificationListening()
             deferred.complete(trimmed.normalizeNumberWords())
             return
         }
@@ -282,9 +305,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         when (intentResult) {
             is IntentResult.Matched -> {
                 val flow = intentResult.flow
-                val slots = intentResult.extractedSlots
+                val slots = intentResult.extractedSlots.toMutableMap()
                 val confidence = intentResult.confidence
                 Log.i(TAG, "Matched flow '${flow.name}' with confidence $confidence. Slots: $slots")
+
+                // Auto-detect arithmetic operation from command for calculator workflows
+                if (flow.targetAppPackage.contains("calc", ignoreCase = true) && "operation" !in slots) {
+                    val op = text.extractOperation()
+                    if (op != null) {
+                        slots["operation"] = op
+                        Log.i(TAG, "Injected operation='$op' from command text")
+                    }
+                }
 
                 voiceManager.speak("Executing ${flow.name}.")
                 replayWorkflow(flow, slots)
@@ -298,7 +330,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 stateMachine.transition(SystemMode.CLARIFYING, "Missing info for ${flow.name}")
 
                 // Resolve each missing slot by asking question + waiting for voice OR text answer
-                val resolved = resolveMissingSlots(flow, missing)
+                val resolved = resolveMissingSlots(flow, missing).toMutableMap()
+
+                // Auto-detect arithmetic operation from command for calculator workflows
+                if (flow.targetAppPackage.contains("calc", ignoreCase = true) && "operation" !in resolved) {
+                    val op = text.extractOperation()
+                    if (op != null) {
+                        resolved["operation"] = op
+                        Log.i(TAG, "Injected operation='$op' from command text into resolved slots")
+                    }
+                }
 
                 Log.i(TAG, "Clarification resolved slots: $resolved")
                 voiceManager.speak("Got it! Executing ${flow.name}.")
@@ -342,23 +383,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
             // Speak the question, then wait for TTS to finish
             voiceManager.speak(question)
-            delay(750) // Let audio hardware switch from TTS output to mic input
+            delay(400) // Let audio hardware switch from TTS output to mic input
 
             // Create a deferred that both voice and text input can complete
             val deferred = CompletableDeferred<String?>()
             clarificationDeferred = deferred
 
-            // Start voice listening in background — loop so brief silences don't shut off the mic
-            val listenJob = viewModelScope.launch(Dispatchers.Main) {
-                while (!deferred.isCompleted) {
-                    val voiceResult = voiceManager.listen()
-                    if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
-                        deferred.complete(voiceResult.trim().normalizeNumberWords())
-                        break
-                    }
-                    delay(300)
-                }
-            }
+            // Start managed voice listening in background
+            startClarificationListening(deferred)
 
             // Overall safety timeout of 45 seconds to answer via voice or text
             val timeoutJob = viewModelScope.launch {
@@ -371,8 +403,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             // Wait for answer from EITHER voice or text
             val answer = deferred.await()
             timeoutJob.cancel()
-            listenJob.cancel()
-            voiceManager.stop()
+            stopClarificationListening()
             clarificationDeferred = null
 
             if (!answer.isNullOrBlank()) {
@@ -422,9 +453,31 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${result.actions.size} actions with AI...")
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Filtering ${result.actions.size} actions with AI...")
 
-                val synthResult = app.workflowSynthesizer.synthesize(result)
+                // Phase 11: LLM-enhanced action cleaning before synthesis (10s timeout)
+                val actionCleaner = ActionCleaner()
+                val llmCleanedActions = try {
+                    kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                        actionCleaner.filterWithLLM(result.actions, result.utterance, app.geminiClient)
+                    } ?: run {
+                        Log.w(TAG, "LLM action filtering timed out after 10s, skipping")
+                        result.actions
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "LLM action filtering failed, using rule-cleaned actions", e)
+                    result.actions
+                }
+                val cleanedResult = if (llmCleanedActions.size != result.actions.size) {
+                    Log.i(TAG, "LLM action cleaning: ${result.actions.size} -> ${llmCleanedActions.size} actions")
+                    result.copy(actions = llmCleanedActions)
+                } else {
+                    result
+                }
+
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${cleanedResult.actions.size} actions with AI...")
+
+                val synthResult = app.workflowSynthesizer.synthesize(cleanedResult)
                 val workflow = synthResult.workflow
 
                 if (workflow == null) {

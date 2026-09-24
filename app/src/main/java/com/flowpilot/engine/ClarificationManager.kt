@@ -41,10 +41,13 @@ class ClarificationManager(
             "restaurant" -> "Which restaurant would you like to order from?"
             "item", "food", "dish" -> "What item would you like to order?"
             "quantity", "count", "number" -> "How many would you like?"
-            "address" -> "Which address should I deliver to?"
+            "address", "delivery_address" -> "Which address should I deliver to? (Home, Work, etc.)"
+            "operation" -> "What operation? (add, subtract, multiply, or divide)"
             "search_query", "query", "search" -> "What would you like to search for?"
             "first_number", "number1", "num1" -> "What's the first number?"
             "second_number", "number2", "num2" -> "What's the second number?"
+            "size" -> "What size would you like?"
+            "color", "colour" -> "What color would you like?"
             else -> "What should the ${slotName.replace('_', ' ')} be?"
         }
     }
