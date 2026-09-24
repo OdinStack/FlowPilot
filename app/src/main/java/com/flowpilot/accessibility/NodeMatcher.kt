@@ -44,11 +44,14 @@ class NodeMatcher {
             }
         }.sortedByDescending { it.score }
 
-        val best = scored.firstOrNull()?.takeIf { it.score >= 0.45f }
+        // Use the configured threshold from Constants
+        val threshold = Constants.NODE_MATCH_THRESHOLD
+        val best = scored.firstOrNull()?.takeIf { it.score >= threshold }
         if (best != null) {
             Log.d(TAG, "Matched best node: score=${best.score}, details=${best.matchDetails}")
         } else {
-            Log.d(TAG, "No node matched threshold (0.45) for spec: $resolvedSpec")
+            val topScore = scored.firstOrNull()?.score
+            Log.d(TAG, "No node matched threshold ($threshold) for spec: $resolvedSpec (top score: $topScore)")
         }
         return best
     }

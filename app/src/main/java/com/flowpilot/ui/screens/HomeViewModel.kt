@@ -6,8 +6,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.flowpilot.FlowPilotApp
 import com.flowpilot.accessibility.FlowPilotAccessibilityService
+import com.flowpilot.accessibility.SafetyDetector
+import com.flowpilot.accessibility.ScreenAnalyzer
 import com.flowpilot.ai.IntentResult
 import com.flowpilot.data.models.Workflow
+import com.flowpilot.data.repository.ExecutionLog
+import com.flowpilot.engine.ClarificationManager
+import com.flowpilot.engine.ActionCleaner
+import com.flowpilot.engine.RecoveryManager
 import com.flowpilot.engine.ReplayEngine
 import com.flowpilot.engine.SystemMode
 import com.flowpilot.engine.SystemStateMachine
@@ -15,11 +21,27 @@ import com.flowpilot.engine.TeachingCoordinator
 import com.flowpilot.engine.TeachingResult
 import com.flowpilot.voice.VoiceManager
 import com.flowpilot.voice.VoiceState
+import com.flowpilot.util.normalizeNumberWords
+import com.flowpilot.util.extractOperation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+
+data class ReplayFailureInfo(
+    val workflowName: String,
+    val stepIndex: Int,
+    val totalSteps: Int,
+    val stepDescription: String,
+    val reason: String,
+    val suggestion: String,
+    val workflow: Workflow,
+    val slotValues: Map<String, String>
+)
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -32,7 +54,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val stateMachine = SystemStateMachine()
     val voiceManager = VoiceManager(application)
     val teachingCoordinator = TeachingCoordinator(application, stateMachine)
-    val replayEngine = ReplayEngine(stateMachine = stateMachine)
+    private val recoveryManager = RecoveryManager(
+        screenAnalyzer = ScreenAnalyzer(),
+        safetyDetector = SafetyDetector(),
+        geminiClient = app.geminiClient,
+        serviceProvider = { FlowPilotAccessibilityService.instance }
+    )
+    val replayEngine = ReplayEngine(stateMachine = stateMachine, recoveryManager = recoveryManager, geminiClient = app.geminiClient)
+    private val clarificationManager = ClarificationManager(app.intentProcessor)
 
     val systemState = stateMachine.state
     val voiceState = voiceManager.voiceState
@@ -49,6 +78,30 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _lastSynthesizedWorkflow = MutableStateFlow<Workflow?>(null)
     val lastSynthesizedWorkflow: StateFlow<Workflow?> = _lastSynthesizedWorkflow.asStateFlow()
 
+    // Clarification answer bridge: both voice and text can complete this
+    private var clarificationDeferred: CompletableDeferred<String?>? = null
+    private var clarificationListenJob: Job? = null
+
+    private fun startClarificationListening(deferred: CompletableDeferred<String?>) {
+        clarificationListenJob?.cancel()
+        clarificationListenJob = viewModelScope.launch(Dispatchers.Main) {
+            while (!deferred.isCompleted) {
+                val voiceResult = voiceManager.listen()
+                if (!voiceResult.isNullOrBlank() && !deferred.isCompleted) {
+                    deferred.complete(voiceResult.trim().normalizeNumberWords())
+                    break
+                }
+                delay(300)
+            }
+        }
+    }
+
+    private fun stopClarificationListening() {
+        clarificationListenJob?.cancel()
+        clarificationListenJob = null
+        voiceManager.stop()
+    }
+
     fun clearLastTeachingResult() {
         _lastTeachingResult.value = null
     }
@@ -56,7 +109,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     init {
         voiceManager.initialize()
 
-        // Observe saved workflows from database
         viewModelScope.launch(Dispatchers.IO) {
             app.repository.getAllWorkflows().collect { workflows ->
                 _savedWorkflows.value = workflows
@@ -64,7 +116,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // When teaching completes, synthesize workflow via Gemini and save to database
         viewModelScope.launch(Dispatchers.Main) {
             teachingCoordinator.teachingResults.collect { result ->
                 _lastTeachingResult.value = result
@@ -75,6 +126,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onMicTapped() {
         val currentVoiceState = voiceState.value
+
+        val deferred = clarificationDeferred
+        if (deferred != null && !deferred.isCompleted) {
+            // In clarification mode: toggle mic cleanly without multiple concurrent listeners
+            if (currentVoiceState is VoiceState.Listening) {
+                stopClarificationListening()
+            } else {
+                startClarificationListening(deferred)
+            }
+            return
+        }
+
         if (currentVoiceState is VoiceState.Listening) {
             voiceManager.stop()
             return
@@ -99,7 +162,28 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteWorkflow(workflow: Workflow) {
         viewModelScope.launch(Dispatchers.IO) {
             app.repository.deleteWorkflow(workflow.id)
+            _savedWorkflows.value = _savedWorkflows.value.filter { it.id != workflow.id }
+            if (_lastSynthesizedWorkflow.value?.id == workflow.id) {
+                _lastSynthesizedWorkflow.value = null
+            }
         }
+    }
+
+    private val _replayFailure = MutableStateFlow<ReplayFailureInfo?>(null)
+    val replayFailure: StateFlow<ReplayFailureInfo?> = _replayFailure.asStateFlow()
+
+    fun dismissReplayFailure() {
+        _replayFailure.value = null
+    }
+
+    fun clearError() {
+        stateMachine.reset()
+    }
+
+    fun retryFailedWorkflow() {
+        val failure = _replayFailure.value ?: return
+        dismissReplayFailure()
+        replayWorkflow(failure.workflow, failure.slotValues)
     }
 
     fun replayWorkflow(workflow: Workflow, slotValues: Map<String, String> = emptyMap()) {
@@ -113,16 +197,65 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            val startTime = System.currentTimeMillis()
             val result = replayEngine.execute(workflow, slotValues)
+
+            val stepDetails = result.stepResults.map { sr ->
+                val emoji = if (sr.success) "✅" else "❌"
+                val durationStr = "${"%.1f".format(sr.durationMs / 1000.0)}s"
+                "$emoji Step ${sr.stepIndex + 1}: ${sr.action} — ${sr.details} ($durationStr)"
+            }
+            try {
+                app.repository.logExecution(ExecutionLog(
+                    workflowId = workflow.id,
+                    workflowName = workflow.name,
+                    startedAt = startTime,
+                    completedAt = System.currentTimeMillis(),
+                    success = result.success,
+                    stoppedAtStep = if (!result.success) result.stepsCompleted else null,
+                    stopReason = result.stopReason,
+                    stepsCompleted = result.stepsCompleted,
+                    totalSteps = result.totalSteps,
+                    details = stepDetails
+                ))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to log execution", e)
+            }
+
             viewModelScope.launch(Dispatchers.Main) {
                 if (result.success) {
+                    _replayFailure.value = null
                     if (result.stopReason != null && result.stopReason.contains("Credential", ignoreCase = true)) {
                         voiceManager.speak("I've stopped at the security screen. Please complete this step yourself.")
                     } else {
                         voiceManager.speak("Finished executing ${workflow.name} successfully.")
                     }
                 } else {
-                    voiceManager.speak("Replay stopped: ${result.stopReason ?: "an error occurred"}")
+                    val failedStep = workflow.steps.getOrNull(result.stepsCompleted)
+                    val stepNum = result.stepsCompleted + 1
+                    val stepDesc = failedStep?.description?.ifBlank { "${failedStep.type.name} step $stepNum" } ?: "Step $stepNum"
+
+                    val suggestion = when {
+                        workflow.targetAppPackage.contains("zomato", ignoreCase = true) ->
+                            "In Zomato, search results display categories and dish suggestions before the full menu. Tap a dish suggestion (like 'Chicken Biryani Dish') or scroll down to find the Add button."
+                        workflow.targetAppPackage.contains("amazon", ignoreCase = true) ->
+                            "In Amazon, sponsored ads and filter banners appear at the top. Scroll down past sponsored items to find your product."
+                        else ->
+                            "Make sure the target app is showing the expected screen, or demonstrate the steps again."
+                    }
+
+                    _replayFailure.value = ReplayFailureInfo(
+                        workflowName = workflow.name.replace('_', ' ').replaceFirstChar { it.uppercase() },
+                        stepIndex = stepNum,
+                        totalSteps = workflow.steps.size,
+                        stepDescription = stepDesc,
+                        reason = result.stopReason ?: "Could not find or interact with the target element",
+                        suggestion = suggestion,
+                        workflow = workflow,
+                        slotValues = slotValues
+                    )
+
+                    voiceManager.speak("Replay stopped at step $stepNum. $stepDesc could not be completed.")
                 }
             }
         }
@@ -131,6 +264,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun submitTextCommand(text: String) {
         val trimmed = text.trim()
         if (trimmed.isBlank()) return
+
+        // If we're waiting for a clarification answer, feed it to the deferred
+        val deferred = clarificationDeferred
+        if (deferred != null && !deferred.isCompleted) {
+            stopClarificationListening()
+            deferred.complete(trimmed.normalizeNumberWords())
+            return
+        }
+
         viewModelScope.launch(Dispatchers.Main) {
             handleVoiceCommand(trimmed)
         }
@@ -151,13 +293,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val flows = _savedWorkflows.value
 
         if (flows.isEmpty()) {
-            // No workflows saved yet — go straight to teaching
             voiceManager.speak("No workflows learned yet. I'll record your demonstration. Show me the steps and tap Done when finished.")
             teachingCoordinator.startTeaching(text)
             return
         }
 
-        // Try to match the command to existing workflows
         stateMachine.transition(SystemMode.PROCESSING, "Checking known workflows...")
 
         val intentResult = app.intentProcessor.process(text, flows)
@@ -165,13 +305,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         when (intentResult) {
             is IntentResult.Matched -> {
                 val flow = intentResult.flow
-                val slots = intentResult.extractedSlots
+                val slots = intentResult.extractedSlots.toMutableMap()
                 val confidence = intentResult.confidence
                 Log.i(TAG, "Matched flow '${flow.name}' with confidence $confidence. Slots: $slots")
 
-                val slotSummary = if (slots.isNotEmpty()) {
-                    slots.entries.joinToString(", ") { "${it.key}=${it.value}" }
-                } else "no parameters"
+                // Auto-detect arithmetic operation from command for calculator workflows
+                if (flow.targetAppPackage.contains("calc", ignoreCase = true) && "operation" !in slots) {
+                    val op = text.extractOperation()
+                    if (op != null) {
+                        slots["operation"] = op
+                        Log.i(TAG, "Injected operation='$op' from command text")
+                    }
+                }
 
                 voiceManager.speak("Executing ${flow.name}.")
                 replayWorkflow(flow, slots)
@@ -184,10 +329,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
                 stateMachine.transition(SystemMode.CLARIFYING, "Missing info for ${flow.name}")
 
-                val question = app.intentProcessor.generateClarificationQuestion(flow, missing.first())
-                voiceManager.speak(question)
-                stateMachine.transition(SystemMode.IDLE, "Asked: $question")
-                // TODO: Listen for answer and re-process
+                // Resolve each missing slot by asking question + waiting for voice OR text answer
+                val resolved = resolveMissingSlots(flow, missing).toMutableMap()
+
+                // Auto-detect arithmetic operation from command for calculator workflows
+                if (flow.targetAppPackage.contains("calc", ignoreCase = true) && "operation" !in resolved) {
+                    val op = text.extractOperation()
+                    if (op != null) {
+                        resolved["operation"] = op
+                        Log.i(TAG, "Injected operation='$op' from command text into resolved slots")
+                    }
+                }
+
+                Log.i(TAG, "Clarification resolved slots: $resolved")
+                voiceManager.speak("Got it! Executing ${flow.name}.")
+                replayWorkflow(flow, resolved)
             }
 
             is IntentResult.Unknown -> {
@@ -208,6 +364,74 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Ask the user for each missing slot value. Accepts BOTH voice and typed text as answers.
+     * Uses CompletableDeferred so onMicTapped() and submitTextCommand() can both provide answers.
+     */
+    private suspend fun resolveMissingSlots(
+        flow: Workflow,
+        missingSlots: List<String>
+    ): Map<String, String> {
+        val resolved = mutableMapOf<String, String>()
+
+        for (slotName in missingSlots) {
+            // Generate question
+            val question = clarificationManager.generateQuestion(flow, slotName)
+            Log.i(TAG, "Asking for slot '$slotName': $question")
+
+            stateMachine.transition(SystemMode.CLARIFYING, question)
+
+            // Speak the question, then wait for TTS to finish
+            voiceManager.speak(question)
+            delay(400) // Let audio hardware switch from TTS output to mic input
+
+            // Create a deferred that both voice and text input can complete
+            val deferred = CompletableDeferred<String?>()
+            clarificationDeferred = deferred
+
+            // Start managed voice listening in background
+            startClarificationListening(deferred)
+
+            // Overall safety timeout of 45 seconds to answer via voice or text
+            val timeoutJob = viewModelScope.launch {
+                delay(45_000L)
+                if (!deferred.isCompleted) {
+                    deferred.complete(null)
+                }
+            }
+
+            // Wait for answer from EITHER voice or text
+            val answer = deferred.await()
+            timeoutJob.cancel()
+            stopClarificationListening()
+            clarificationDeferred = null
+
+            if (!answer.isNullOrBlank()) {
+                val normalized = answer.trim().normalizeNumberWords()
+                resolved[slotName] = normalized
+                Log.i(TAG, "Got answer for '$slotName': '$normalized' (raw: '$answer')")
+            } else {
+                // Use default value if available
+                val defaultValue = flow.slots[slotName]?.defaultValue
+                if (!defaultValue.isNullOrBlank()) {
+                    resolved[slotName] = defaultValue.normalizeNumberWords()
+                    Log.i(TAG, "Using default for '$slotName': '$defaultValue'")
+                } else {
+                    Log.w(TAG, "No answer and no default for slot '$slotName'")
+                }
+            }
+        }
+
+        // Fill any remaining optional slots with their defaults
+        for ((name, slot) in flow.slots) {
+            if (name !in resolved && !slot.defaultValue.isNullOrBlank()) {
+                resolved[name] = slot.defaultValue
+            }
+        }
+
+        return resolved
+    }
+
     private fun synthesizeAndSaveWorkflow(result: TeachingResult) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -220,39 +444,59 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                if (com.flowpilot.util.Constants.GEMINI_API_KEY.isBlank() ||
-                    com.flowpilot.util.Constants.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE"
-                ) {
-                    Log.w(TAG, "Gemini API key not configured")
-                    stateMachine.setError("Gemini API key missing. Set GEMINI_API_KEY in Constants.kt")
+                if (!com.flowpilot.util.Constants.hasAnyAiKey()) {
+                    Log.w(TAG, "No AI API key configured")
+                    stateMachine.setError("AI API key missing. Set API keys in Constants.kt")
                     viewModelScope.launch(Dispatchers.Main) {
-                        voiceManager.speak("Captured ${result.actions.size} actions, but Gemini API key is missing in Constants.kt.")
+                        voiceManager.speak("Captured ${result.actions.size} actions, but no AI API key is configured.")
                     }
                     return@launch
                 }
 
-                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${result.actions.size} actions with AI...")
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Filtering ${result.actions.size} actions with AI...")
 
-                // Step 1: Synthesize workflow from demonstration using Gemini
-                val workflow = app.workflowSynthesizer.synthesize(result)
+                // Phase 11: LLM-enhanced action cleaning before synthesis (10s timeout)
+                val actionCleaner = ActionCleaner()
+                val llmCleanedActions = try {
+                    kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                        actionCleaner.filterWithLLM(result.actions, result.utterance, app.geminiClient)
+                    } ?: run {
+                        Log.w(TAG, "LLM action filtering timed out after 10s, skipping")
+                        result.actions
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "LLM action filtering failed, using rule-cleaned actions", e)
+                    result.actions
+                }
+                val cleanedResult = if (llmCleanedActions.size != result.actions.size) {
+                    Log.i(TAG, "LLM action cleaning: ${result.actions.size} -> ${llmCleanedActions.size} actions")
+                    result.copy(actions = llmCleanedActions)
+                } else {
+                    result
+                }
+
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${cleanedResult.actions.size} actions with AI...")
+
+                val synthResult = app.workflowSynthesizer.synthesize(cleanedResult)
+                val workflow = synthResult.workflow
 
                 if (workflow == null) {
-                    Log.e(TAG, "Workflow synthesis failed")
-                    stateMachine.setError("Workflow synthesis failed. Please check your API key or internet connection.")
+                    val reason = synthResult.errorReason ?: "Could not understand demonstration"
+                    Log.e(TAG, "Workflow synthesis failed: $reason")
+                    stateMachine.setError("Learning failed: $reason")
                     viewModelScope.launch(Dispatchers.Main) {
-                        voiceManager.speak("Sorry, I couldn't understand the workflow. Please try teaching again.")
+                        voiceManager.speak("Sorry, $reason. Please try teaching again.")
                     }
                     return@launch
                 }
 
-                // Step 2: Compute trigger embedding for fast future matching
                 val embedding = app.flowMatcher.computeTriggerEmbedding(workflow.triggerUtterance)
                 val workflowWithEmbedding = workflow.copy(triggerEmbedding = embedding)
 
-                // Step 3: Save to Room database
                 app.repository.saveWorkflow(workflowWithEmbedding)
 
                 _lastSynthesizedWorkflow.value = workflowWithEmbedding
+                _savedWorkflows.value = listOf(workflowWithEmbedding) + _savedWorkflows.value.filter { it.id != workflowWithEmbedding.id }
 
                 Log.i(TAG, "Workflow '${workflow.name}' synthesized and saved. ${workflow.steps.size} steps, ${workflow.slots.size} slots.")
 

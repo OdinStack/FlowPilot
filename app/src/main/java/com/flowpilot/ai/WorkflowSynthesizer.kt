@@ -5,6 +5,11 @@ import com.flowpilot.data.models.*
 import com.flowpilot.engine.TeachingResult
 import kotlinx.serialization.json.*
 
+data class SynthesisResult(
+    val workflow: Workflow?,
+    val errorReason: String? = null
+)
+
 class WorkflowSynthesizer(private val gemini: GeminiClient) {
 
     companion object {
@@ -73,12 +78,15 @@ IMPORTANT:
 """
     }
 
-    suspend fun synthesize(teaching: TeachingResult): Workflow? {
+    suspend fun synthesize(teaching: TeachingResult): SynthesisResult {
+        if (teaching.actions.isEmpty()) {
+            return SynthesisResult(null, "No actions were recorded during teaching.")
+        }
+
         val actionsDescription = formatActionsForLLM(teaching.actions)
         val prompt = buildSynthesisPrompt(teaching.utterance, actionsDescription, teaching.targetPackage)
 
-        Log.d(TAG, "Synthesizing workflow for: \"${teaching.utterance}\"")
-        Log.d(TAG, "Actions to synthesize:\n$actionsDescription")
+        Log.d(TAG, "Synthesizing workflow for: \"${teaching.utterance}\" (${teaching.actions.size} actions)")
 
         val response = gemini.generate(
             systemPrompt = SYNTHESIS_SYSTEM_PROMPT,
@@ -87,12 +95,16 @@ IMPORTANT:
         )
 
         if (response == null) {
-            Log.e(TAG, "Gemini returned null for synthesis")
-            return null
+            Log.e(TAG, "All AI providers returned null for synthesis")
+            return SynthesisResult(null, "AI API unavailable or request timed out.")
         }
 
-        Log.d(TAG, "Raw synthesis response: $response")
-        return parseWorkflowFromJson(response, teaching.targetPackage)
+        val parsed = parseWorkflowFromJson(response, teaching.targetPackage)
+        return if (parsed != null) {
+            SynthesisResult(parsed, null)
+        } else {
+            SynthesisResult(null, "Could not parse valid workflow JSON from AI response.")
+        }
     }
 
     private fun formatActionsForLLM(actions: List<RecordedAction>): String {
@@ -138,11 +150,13 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
 
     private fun parseWorkflowFromJson(jsonStr: String, fallbackPackage: String): Workflow? {
         return try {
-            val cleanJson = jsonStr.trim()
-                .removePrefix("```json")
-                .removePrefix("```")
-                .removeSuffix("```")
-                .trim()
+            val startIdx = jsonStr.indexOf('{')
+            val endIdx = jsonStr.lastIndexOf('}')
+            if (startIdx == -1 || endIdx == -1 || endIdx < startIdx) {
+                Log.e(TAG, "No JSON object found in response: $jsonStr")
+                return null
+            }
+            val cleanJson = jsonStr.substring(startIdx, endIdx + 1)
             val json = Json { ignoreUnknownKeys = true; isLenient = true }
             val obj = json.parseToJsonElement(cleanJson).jsonObject
 
@@ -163,7 +177,7 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
                 steps = steps
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse workflow JSON", e)
+            Log.e(TAG, "Failed to parse workflow JSON: $jsonStr", e)
             null
         }
     }

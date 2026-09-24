@@ -5,6 +5,21 @@ object Constants {
     val GEMINI_API_KEY: String
         get() = com.flowpilot.BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() }
             ?: "YOUR_GEMINI_API_KEY_HERE"
+
+    val GROQ_API_KEY: String
+        get() = com.flowpilot.BuildConfig.GROQ_API_KEY.takeIf { it.isNotBlank() }
+            ?: ""
+
+    val OPENROUTER_API_KEY: String
+        get() = com.flowpilot.BuildConfig.OPENROUTER_API_KEY.takeIf { it.isNotBlank() }
+            ?: ""
+
+    fun hasAnyAiKey(): Boolean {
+        val gemini = GEMINI_API_KEY.isNotBlank() && GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE"
+        val groq = GROQ_API_KEY.isNotBlank()
+        val openRouter = OPENROUTER_API_KEY.isNotBlank()
+        return gemini || groq || openRouter
+    }
     
     // Timing constants
     const val UI_SETTLE_DELAY_MS = 500L
@@ -15,7 +30,7 @@ object Constants {
     const val STEP_TIMEOUT_MS = 10_000L
     
     // Matching thresholds
-    const val NODE_MATCH_THRESHOLD = 0.6f
+    const val NODE_MATCH_THRESHOLD = 0.5f
     const val HIGH_CONFIDENCE_THRESHOLD = 0.88f
     const val LOW_CONFIDENCE_THRESHOLD = 0.55f
     
@@ -72,6 +87,8 @@ object Constants {
             "com.oppo.launcher",
             "com.oneplus.launcher",
             "com.nothing.launcher",
+            "com.coloros.home",
+            "com.heytap.launcher",
             "com.android.systemui",
             "com.samsung.android.honeyboard",
             "com.samsung.android.app.galaxyfinder",
@@ -83,6 +100,9 @@ object Constants {
                 lower.contains("systemui") ||
                 lower.contains("keyboard") ||
                 lower.contains("honeyboard") ||
-                lower.contains("quicksearch")
+                lower.contains("quicksearch") ||
+                lower.contains("home") ||
+                lower.contains("inputmethod") ||
+                lower.contains("safecenter")
     }
 }

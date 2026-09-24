@@ -185,19 +185,48 @@ class UITreeParser {
             android.util.Log.w("UITreeParser", "Could not get bounds", e)
         }
 
-        val contextTexts = try {
-            getContextTexts(node)
-        } catch (e: Exception) {
-            emptyList()
+        var text = node.text?.toString()?.takeIf { it.isNotBlank() }
+        var desc = node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        var resId = node.viewIdResourceName?.takeIf { it.isNotBlank() }
+
+        // Container view enhancement (crucial for Zomato, Amazon, Swiggy, etc.):
+        // If the clicked container has no text, extract readable text from its children
+        if (text == null && desc == null) {
+            val childTexts = mutableListOf<String>()
+            val childIds = mutableListOf<String>()
+
+            fun scanChildren(n: AccessibilityNodeInfo, currentDepth: Int) {
+                if (currentDepth > 3) return
+                for (i in 0 until n.childCount) {
+                    val child = try { n.getChild(i) } catch (e: Exception) { null } ?: continue
+                    child.text?.toString()?.takeIf { it.isNotBlank() }?.let { childTexts.add(it.trim()) }
+                    child.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { childTexts.add(it.trim()) }
+                    child.viewIdResourceName?.takeIf { it.isNotBlank() }?.let { childIds.add(it) }
+                    scanChildren(child, currentDepth + 1)
+                    child.recycle()
+                }
+            }
+            scanChildren(node, 0)
+
+            val distinctTexts = childTexts.distinct()
+            if (distinctTexts.isNotEmpty()) {
+                text = distinctTexts.first()
+                if (distinctTexts.size > 1) {
+                    desc = distinctTexts.drop(1).joinToString(" • ")
+                }
+            }
+            if (resId == null && childIds.isNotEmpty()) {
+                resId = childIds.first()
+            }
         }
 
         return try {
             UINode(
                 id = UUID.randomUUID().toString(),
                 className = node.className?.toString() ?: "unknown",
-                text = node.text?.toString(),
-                contentDescription = node.contentDescription?.toString(),
-                resourceId = node.viewIdResourceName,
+                text = text,
+                contentDescription = desc,
+                resourceId = resId,
                 hintText = node.hintText?.toString(),
                 bounds = BoundsRect.fromAndroidRect(bounds),
                 isClickable = node.isClickable,

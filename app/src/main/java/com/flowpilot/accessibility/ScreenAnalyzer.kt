@@ -57,27 +57,32 @@ class ScreenAnalyzer {
     }
 
     /**
-     * Check if there's a popup/dialog overlay on screen.
+     * Check if there's a dismissible popup/dialog overlay on screen.
+     * Only returns true if we both detect a dialog-like structure AND find a dismiss button,
+     * to avoid false positives on normal screens with overlay/bottom_sheet views.
      */
     fun hasPopupOverlay(root: AccessibilityNodeInfo): Boolean {
         try {
             val className = root.className?.toString() ?: ""
-            if (className.contains("Dialog", ignoreCase = true) ||
-                className.contains("BottomSheet", ignoreCase = true)) {
+            // Root-level dialog detection is highly reliable
+            if (className.contains("Dialog", ignoreCase = true)) {
                 return true
             }
 
-            fun check(node: AccessibilityNodeInfo, depth: Int): Boolean {
-                if (depth > 25) return false
+            // For structural checks, only flag if a dismiss button is also present
+            fun hasDialogStructure(node: AccessibilityNodeInfo, depth: Int): Boolean {
+                if (depth > 15) return false
                 try {
                     val id = node.viewIdResourceName?.lowercase() ?: ""
+                    val cls = node.className?.toString() ?: ""
+                    // Only match explicit dialog/modal IDs, not generic "overlay" or "bottom_sheet"
                     if (id.contains("dialog") || id.contains("popup") || id.contains("modal") ||
-                        id.contains("overlay") || id.contains("bottom_sheet")) {
+                        cls.contains("Dialog", ignoreCase = true) || cls.contains("AlertDialog", ignoreCase = true)) {
                         return true
                     }
                     for (i in 0 until node.childCount) {
                         val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
-                        val has = check(child, depth + 1)
+                        val has = hasDialogStructure(child, depth + 1)
                         child.recycle()
                         if (has) return true
                     }
@@ -87,7 +92,12 @@ class ScreenAnalyzer {
                 return false
             }
 
-            return check(root, 0)
+            if (hasDialogStructure(root, 0)) {
+                // Double-check: only report overlay if a dismiss button exists
+                return findDismissButton(root) != null
+            }
+
+            return false
         } catch (e: Exception) {
             return false
         }

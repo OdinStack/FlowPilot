@@ -30,7 +30,12 @@ class WorkflowRepository(private val dao: WorkflowDao) {
 
     companion object {
         private const val TAG = "WorkflowRepository"
-        private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+        private val json = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            coerceInputValues = true
+            encodeDefaults = true
+        }
     }
 
     fun getAllWorkflows(): Flow<List<Workflow>> {
@@ -48,16 +53,17 @@ class WorkflowRepository(private val dao: WorkflowDao) {
     }
 
     suspend fun saveWorkflow(workflow: Workflow) {
+        val leanWorkflow = workflow.copy(triggerEmbedding = null)
         val entity = WorkflowEntity(
             id = workflow.id,
             name = workflow.name,
             description = workflow.description,
             triggerUtterance = workflow.triggerUtterance,
             triggerEmbeddingJson = workflow.triggerEmbedding?.let {
-                json.encodeToString(it)
+                try { json.encodeToString(it) } catch (e: Exception) { null }
             },
             targetAppPackage = workflow.targetAppPackage,
-            workflowJson = json.encodeToString(workflow),
+            workflowJson = json.encodeToString(leanWorkflow),
             createdAt = workflow.createdAt
         )
         withContext(Dispatchers.IO) {
@@ -83,13 +89,44 @@ class WorkflowRepository(private val dao: WorkflowDao) {
         return dao.getLastLog()?.toExecutionLog()
     }
 
+    fun getRecentLogs(): Flow<List<ExecutionLog>> {
+        return dao.getRecentLogs().map { entities ->
+            entities.mapNotNull { entity ->
+                try { entity.toExecutionLog() } catch (e: Exception) { null }
+            }
+        }
+    }
+
     // Conversion helpers
     private fun WorkflowEntity.toWorkflow(): Workflow? {
         return try {
-            json.decodeFromString<Workflow>(workflowJson)
+            val wf = json.decodeFromString<Workflow>(workflowJson)
+            val embedding = triggerEmbeddingJson?.let {
+                try { json.decodeFromString<List<Float>>(it) } catch (e: Exception) { null }
+            }
+            wf.copy(
+                id = id,
+                name = name,
+                description = description,
+                triggerUtterance = triggerUtterance,
+                targetAppPackage = targetAppPackage,
+                triggerEmbedding = embedding ?: wf.triggerEmbedding,
+                createdAt = createdAt
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to deserialize workflow: $id", e)
-            null
+            Log.e(TAG, "Failed to deserialize workflow: $id ($name)", e)
+            try {
+                Workflow(
+                    id = id,
+                    name = name,
+                    description = description,
+                    triggerUtterance = triggerUtterance,
+                    targetAppPackage = targetAppPackage,
+                    createdAt = createdAt
+                )
+            } catch (ex: Exception) {
+                null
+            }
         }
     }
 

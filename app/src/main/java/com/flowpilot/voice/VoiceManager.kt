@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.resume
+import com.flowpilot.util.normalizeNumberWords
 
 sealed class VoiceState {
     object Idle : VoiceState()
@@ -77,14 +78,21 @@ class VoiceManager(private val context: Context) {
             val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
             speechRecognizer = recognizer
 
+            var lastPartial: String? = null
+
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(
                     RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                 )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+                val lang = Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() } ?: "en-US"
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
             }
 
             recognizer.setRecognitionListener(object : RecognitionListener {
@@ -105,27 +113,42 @@ class VoiceManager(private val context: Context) {
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()
                     if (!partial.isNullOrBlank()) {
+                        lastPartial = partial
                         _voiceState.value = VoiceState.Partial(partial)
                     }
                 }
 
                 override fun onResults(results: Bundle?) {
-                    val text = results
+                    val matches = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
+                    Log.i(TAG, "Speech results candidates: $matches (lastPartial: $lastPartial)")
 
-                    Log.i(TAG, "Speech result: \"$text\"")
-                    if (!text.isNullOrBlank()) {
-                        _voiceState.value = VoiceState.Result(text)
+                    // Prioritize candidates that contain digits or number words if available
+                    val bestCandidate = matches?.firstOrNull { cand ->
+                        val norm = cand.normalizeNumberWords()
+                        norm.any { it.isDigit() }
+                    } ?: matches?.firstOrNull() ?: lastPartial
+
+                    if (!bestCandidate.isNullOrBlank()) {
+                        _voiceState.value = VoiceState.Result(bestCandidate)
                     } else {
                         _voiceState.value = VoiceState.Idle
                     }
 
-                    if (cont.isActive) cont.resume(text)
+                    if (cont.isActive) cont.resume(bestCandidate)
                     try { recognizer.destroy() } catch (_: Exception) {}
                 }
 
                 override fun onError(error: Int) {
+                    val savedPartial = lastPartial
+                    if (error == SpeechRecognizer.ERROR_NO_MATCH && !savedPartial.isNullOrBlank()) {
+                        Log.i(TAG, "ERROR_NO_MATCH rescued by partial result: '$savedPartial'")
+                        _voiceState.value = VoiceState.Result(savedPartial)
+                        if (cont.isActive) cont.resume(savedPartial)
+                        try { recognizer.destroy() } catch (_: Exception) {}
+                        return
+                    }
+
                     val msg = when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that. Please speak again."
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech detected"
@@ -134,7 +157,7 @@ class VoiceManager(private val context: Context) {
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Audio permission needed"
                         else -> "Speech error: $error"
                     }
-                    Log.w(TAG, "Speech recognition error ($error): $msg")
+                    Log.w(TAG, "Speech recognition error ($error): $msg (partial was: $savedPartial)")
                     _voiceState.value = VoiceState.Error(msg)
                     if (cont.isActive) cont.resume(null)
                     try { recognizer.destroy() } catch (_: Exception) {}

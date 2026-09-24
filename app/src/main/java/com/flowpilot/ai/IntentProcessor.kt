@@ -52,8 +52,11 @@ RULES:
 - "Book a cab" does NOT match "Order pizza"
 - If multiple flows could match, pick the best one and explain why
 - If no flow matches, set matched=false
-- Extract slot values even if they differ from the default values
 - If a required slot is not mentioned in the command, add it to missing_required_slots
+- If the user command expresses the general intent of a workflow even without parameters (e.g. 'calculate' or 'add' matches 'add two numbers on calculator', 'order food' matches 'order on zomato'), set matched=true, set confidence=0.85, leave extracted_slots empty for what wasn't mentioned, and list the missing slots in missing_required_slots so the assistant can prompt for them.
+- QUANTITY: If the user says a number before a noun (e.g. "two pizzas", "3 shirts"), extract it as quantity slot. "Order two Margheritas" → extracted_slots: {"quantity": "2", "item": "Margherita"}
+- ADDRESS: If the user mentions "deliver to Work/Home/Office" or "to my work/home address", extract as address slot.
+- OPERATION: For calculator workflows, if the user says "multiply/subtract/divide/add", extract as operation slot.
 """
 
         private const val SLOT_EXTRACTION_SYSTEM_PROMPT = """
@@ -73,6 +76,9 @@ RULES:
 - Handle synonyms and variations: "margarita" = "Margherita", "dominos" = "Domino's"
 - Numbers: "two" = "2", "three" = "3"
 - If quantity is not mentioned, assume 1
+- QUANTITY: Look for number words before nouns: "two pizzas" → quantity=2, "3 shirts" → quantity=3
+- ADDRESS: "deliver to work" → address="Work", "to my home" → address="Home"
+- OPERATION: "multiply" → operation="multiply", "subtract" → operation="subtract", "divide" → operation="divide", "add/plus/sum" → operation="add"
 """
 
         private const val CLARIFICATION_SYSTEM_PROMPT = """

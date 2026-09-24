@@ -25,22 +25,29 @@ class ActionExecutor(private val service: AccessibilityService) {
     suspend fun click(node: AccessibilityNodeInfo): Boolean {
         Log.d(TAG, "Clicking: ${node.text ?: node.contentDescription ?: node.viewIdResourceName ?: "unknown"}")
 
-        // Try clicking the node directly
+        // 1. Try clicking the node directly via accessibility action
         if (node.isClickable) {
             val result = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            delay(Constants.UI_SETTLE_DELAY_MS)
-            return result
+            if (result) {
+                delay(Constants.UI_SETTLE_DELAY_MS)
+                return true
+            }
+            Log.w(TAG, "Direct performAction(ACTION_CLICK) returned false; trying clickable ancestors...")
         }
 
-        // Walk up to find clickable ancestor
+        // 2. Walk up to find clickable ancestor
         var current: AccessibilityNodeInfo? = node.parent
         var depth = 0
         while (current != null && depth < 5) {
             if (current.isClickable) {
                 val result = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 current.recycle()
-                delay(Constants.UI_SETTLE_DELAY_MS)
-                return result
+                current = null // Prevent double-recycle below
+                if (result) {
+                    delay(Constants.UI_SETTLE_DELAY_MS)
+                    return true
+                }
+                break
             }
             val next = current.parent
             current.recycle()
@@ -49,10 +56,17 @@ class ActionExecutor(private val service: AccessibilityService) {
         }
         current?.recycle()
 
-        // Fallback: tap at the center of the node's bounds using gesture
+        // 3. Guaranteed Fallback: tap at the center of the node's bounds using hardware gesture dispatch
         val bounds = android.graphics.Rect()
         node.getBoundsInScreen(bounds)
-        return tapAtCoordinates(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            Log.w(TAG, "Falling back to coordinate gesture tap at center: (${bounds.centerX()}, ${bounds.centerY()})")
+            val tapped = tapAtCoordinates(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+            delay(Constants.UI_SETTLE_DELAY_MS)
+            return tapped
+        }
+
+        return false
     }
 
     /**
@@ -90,30 +104,85 @@ class ActionExecutor(private val service: AccessibilityService) {
     }
 
     /**
-     * Scroll a scrollable node forward or backward.
+     * Scroll via physical gesture swipe on screen.
+     * This works reliably across all UI frameworks (Compose, Flutter, WebView, RecyclerView)
+     * where AccessibilityNodeInfo scroll actions may be unimplemented or ignored.
      */
-    suspend fun scroll(node: AccessibilityNodeInfo, forward: Boolean): Boolean {
-        Log.d(TAG, "Scrolling ${if (forward) "forward" else "backward"}")
+    suspend fun swipeScroll(forward: Boolean): Boolean {
+        val displayMetrics = service.resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
 
-        // Find the scrollable node (might be the node itself or an ancestor)
-        var scrollable = node
-        if (!node.isScrollable) {
-            scrollable = findScrollableAncestor(node) ?: run {
-                Log.w(TAG, "No scrollable node found")
-                return false
+        val centerX = width / 2f
+        val startY: Float
+        val endY: Float
+
+        if (forward) {
+            // Scroll down: swipe finger upward from 75% to 25% of screen
+            startY = height * 0.75f
+            endY = height * 0.25f
+        } else {
+            // Scroll up: swipe finger downward from 25% to 75% of screen
+            startY = height * 0.25f
+            endY = height * 0.75f
+        }
+
+        Log.w(TAG, "Dispatching swipe scroll: ($centerX, $startY) -> ($centerX, $endY)")
+        val swiped = suspendCancellableCoroutine<Boolean> { cont ->
+            val path = Path().apply {
+                moveTo(centerX, startY)
+                lineTo(centerX, endY)
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 300))
+                .build()
+
+            val callback = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }
+
+            val dispatched = service.dispatchGesture(gesture, callback, null)
+            if (!dispatched && cont.isActive) {
+                cont.resume(false)
+            }
+        }
+        delay(800) // Settle delay for content loading and scroll momentum
+        return swiped
+    }
+
+    /**
+     * Scroll a scrollable node forward or backward.
+     * Tries node accessibility action first, then automatically falls back to gesture swipe.
+     */
+    suspend fun scroll(node: AccessibilityNodeInfo? = null, forward: Boolean): Boolean {
+        Log.w(TAG, "Scrolling ${if (forward) "forward" else "backward"}")
+
+        if (node != null) {
+            var scrollable = node
+            if (!node.isScrollable) {
+                scrollable = findScrollableAncestor(node) ?: node
+            }
+            val action = if (forward) {
+                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            } else {
+                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            }
+
+            val result = scrollable.performAction(action)
+            if (scrollable !== node) scrollable.recycle()
+            if (result) {
+                delay(800)
+                return true
             }
         }
 
-        val action = if (forward) {
-            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-        } else {
-            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-        }
-
-        val result = scrollable.performAction(action)
-        if (scrollable !== node) scrollable.recycle()
-        delay(800) // Scroll needs more time for content to load
-        return result
+        // Universal fallback: Gesture swipe works regardless of accessibility node support
+        return swipeScroll(forward)
     }
 
     /**
@@ -163,7 +232,7 @@ class ActionExecutor(private val service: AccessibilityService) {
             }
 
             if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
 
                 // 1. Try launching via current foreground Activity (bypasses all background activity restrictions)
                 val currentActivity = com.flowpilot.FlowPilotApp.currentActivity
