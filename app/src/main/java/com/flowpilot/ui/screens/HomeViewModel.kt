@@ -453,29 +453,24 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                stateMachine.transition(SystemMode.SYNTHESIZING, "Filtering ${result.actions.size} actions with AI...")
-
-                // Phase 11: LLM-enhanced action cleaning before synthesis (10s timeout)
-                val actionCleaner = ActionCleaner()
-                val llmCleanedActions = try {
-                    kotlinx.coroutines.withTimeoutOrNull(10_000L) {
-                        actionCleaner.filterWithLLM(result.actions, result.utterance, app.geminiClient)
-                    } ?: run {
-                        Log.w(TAG, "LLM action filtering timed out after 10s, skipping")
+                // Phase 11: Only run separate LLM pre-filter if action list is very large (> 28),
+                // otherwise WorkflowSynthesizer filters noise directly in a single ~2s Groq call.
+                val cleanedResult = if (result.actions.size > 28) {
+                    stateMachine.transition(SystemMode.SYNTHESIZING, "Filtering ${result.actions.size} actions with Groq AI...")
+                    val actionCleaner = ActionCleaner()
+                    val llmCleanedActions = try {
+                        kotlinx.coroutines.withTimeoutOrNull(3_500L) {
+                            actionCleaner.filterWithLLM(result.actions, result.utterance, app.geminiClient)
+                        } ?: result.actions
+                    } catch (e: Exception) {
                         result.actions
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "LLM action filtering failed, using rule-cleaned actions", e)
-                    result.actions
-                }
-                val cleanedResult = if (llmCleanedActions.size != result.actions.size) {
-                    Log.i(TAG, "LLM action cleaning: ${result.actions.size} -> ${llmCleanedActions.size} actions")
                     result.copy(actions = llmCleanedActions)
                 } else {
                     result
                 }
 
-                stateMachine.transition(SystemMode.SYNTHESIZING, "Analyzing ${cleanedResult.actions.size} actions with AI...")
+                stateMachine.transition(SystemMode.SYNTHESIZING, "Synthesizing ${cleanedResult.actions.size} actions with Groq AI...")
 
                 val synthResult = app.workflowSynthesizer.synthesize(cleanedResult)
                 val workflow = synthResult.workflow

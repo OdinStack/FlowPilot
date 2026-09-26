@@ -227,8 +227,8 @@ a workflow on an Android phone. Given the intended task and the action list, ide
 are RELEVANT to the task and which are IRRELEVANT (accidental touches, 
 receiving a phone call, switching apps, undo-redo scrolls, duplicate taps, etc.).
 
-Return a JSON array of relevant action indices only.
-Example: [0, 1, 2, 4, 5, 7]
+Return a JSON object containing "relevant_indices" as an array of integers.
+Example: {"relevant_indices": [0, 1, 2, 4, 5, 7]}
                 """.trimIndent(),
                 userPrompt = """
 Intended task: "$utterance"
@@ -236,7 +236,7 @@ Intended task: "$utterance"
 Actions:
 $actionsDesc
 
-Return the indices of relevant actions as a JSON array.
+Return the JSON object with "relevant_indices".
                 """.trimIndent(),
                 jsonMode = true
             )
@@ -256,14 +256,25 @@ Return the indices of relevant actions as a JSON array.
                 .removePrefix("```")
                 .removeSuffix("```")
                 .trim()
-            val json = Json { isLenient = true }
-            val relevantIndices = json.decodeFromString<List<Int>>(cleanJson)
+            val json = Json { ignoreUnknownKeys = true; isLenient = true }
+            val relevantIndices: List<Int> = if (cleanJson.startsWith("{")) {
+                val obj = json.parseToJsonElement(cleanJson) as? kotlinx.serialization.json.JsonObject
+                val arr = obj?.get("relevant_indices") as? kotlinx.serialization.json.JsonArray
+                if (arr != null) {
+                    arr.mapNotNull { elem ->
+                        (elem as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+                    }
+                } else {
+                    return actions
+                }
+            } else {
+                json.decodeFromString<List<Int>>(cleanJson)
+            }
             val filtered = actions.filterIndexed { i, _ -> i in relevantIndices }
             if (filtered.isEmpty()) {
                 Log.w(TAG, "LLM filter removed ALL actions, keeping originals")
                 actions
             } else if (filtered.size < actions.size * 0.6) {
-                // Safety: if LLM removed more than 40%, it's too aggressive — keep originals
                 Log.w(TAG, "LLM filter too aggressive (kept ${filtered.size}/${actions.size}), keeping originals")
                 actions
             } else {

@@ -135,8 +135,65 @@ class NodeMatcher {
 
         val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
+        val nodeHint = try { node.hintText?.toString() ?: "" } catch (e: Exception) { "" }
         val rawNodeId = try { node.viewIdResourceName ?: "" } catch (e: Exception) { "" }
         val nodeResId = rawNodeId.substringAfterLast('/')
+
+        // ─── APPROACH 1: Semantic Domain Disambiguation (Location/Address vs Restaurant/Product Search) ───
+        val specCombined = listOfNotNull(
+            spec.text, spec.textContains, spec.hintText, spec.contentDescription, spec.semantic, spec.contextTextContains
+        ).joinToString(" ").lowercase()
+
+        val nodeCombined = "$nodeText $nodeDesc $nodeHint $nodeResId".lowercase()
+
+        val isSpecLookingForLocation = specCombined.contains("location") ||
+            specCombined.contains("address") ||
+            specCombined.contains("pincode") ||
+            specCombined.contains("pin code") ||
+            specCombined.contains("deliver to")
+
+        val isNodeLocationField = nodeCombined.contains("search location") ||
+            nodeCombined.contains("location manually") ||
+            nodeCombined.contains("enter location") ||
+            nodeCombined.contains("select a location") ||
+            nodeCombined.contains("search area") ||
+            nodeCombined.contains("search street") ||
+            nodeCombined.contains("enter address") ||
+            nodeCombined.contains("saved address") ||
+            nodeCombined.contains("use current location") ||
+            nodeCombined.contains("pincode") ||
+            nodeCombined.contains("pin code")
+
+        // Never allow a restaurant/product search step to click or type into a location/address field!
+        if (!isSpecLookingForLocation && isNodeLocationField) {
+            return 0f
+        }
+
+        // Dynamic rotating search placeholder support (e.g., Zomato/Swiggy/Amazon/Flipkart/Myntra
+        // where 'Search "sweet cravings"' during teaching changes to 'Search "light meals"' during replay)
+        val isSpecSearchAction = !isSpecLookingForLocation && (
+            specCombined.contains("search") ||
+            spec.text?.lowercase()?.startsWith("search") == true ||
+            spec.textContains?.lowercase()?.startsWith("search") == true ||
+            spec.hintText?.lowercase()?.startsWith("search") == true
+        )
+        if (isSpecSearchAction && !isNodeLocationField) {
+            val looksLikeMainSearchBar = nodeText.trim().lowercase().startsWith("search") ||
+                nodeHint.trim().lowercase().startsWith("search") ||
+                nodeDesc.trim().lowercase().startsWith("search") ||
+                nodeResId.lowercase().contains("search_bar") ||
+                nodeResId.lowercase().contains("search_src_text") ||
+                nodeResId.lowercase().contains("search_box") ||
+                nodeResId.lowercase().contains("edit_search")
+
+            if (looksLikeMainSearchBar && (node.isClickable || node.isEditable || node.isFocusable)) {
+                // Verify context isn't inside a "Select a saved address" or "Select a location" modal
+                val ctx = getContextTexts(node).joinToString(" ").lowercase()
+                if (!ctx.contains("search location manually") && !ctx.contains("select a location")) {
+                    return if (node.isEditable && spec.isEditable == true) 0.96f else 0.91f
+                }
+            }
+        }
 
         // Fast-path exact resource ID match (ONLY when spec.text is null or does not conflict with node text)
         if (spec.resourceId != null) {
@@ -147,7 +204,8 @@ class NodeMatcher {
                 val textConsistent = spec.text == null ||
                     nodeText.isBlank() ||
                     matchesSymbolOrSynonym(spec.text, nodeText) ||
-                    matchesSymbolOrSynonym(spec.text, nodeDesc)
+                    matchesSymbolOrSynonym(spec.text, nodeDesc) ||
+                    (isSpecSearchAction && !isNodeLocationField)
                 if (textConsistent) {
                     return if (node.isClickable) 0.95f else 0.85f
                 }
@@ -207,7 +265,6 @@ class NodeMatcher {
         // 3. Content description match (weight: 0.15)
         if (spec.contentDescription != null) {
             totalWeight += 0.15f
-            val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
             if (nodeDesc.contains(spec.contentDescription, ignoreCase = true)) {
                 score += 0.15f
             } else if (nodeDesc.fuzzyContains(spec.contentDescription)) {
@@ -237,7 +294,6 @@ class NodeMatcher {
         // 6. Hint text match (weight: 0.10)
         if (spec.hintText != null) {
             totalWeight += 0.10f
-            val nodeHint = try { node.hintText?.toString() ?: "" } catch (e: Exception) { "" }
             if (nodeHint.contains(spec.hintText, ignoreCase = true)) {
                 score += 0.10f
             }
@@ -256,7 +312,7 @@ class NodeMatcher {
             }
         }
 
-        return if (totalWeight > 0f) score / totalWeight else 0f
+        return if (totalWeight > 0f) (score / totalWeight).coerceIn(0f, 1f) else 0f
     }
 
     /**
