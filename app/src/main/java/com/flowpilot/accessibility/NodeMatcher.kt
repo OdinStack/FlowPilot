@@ -133,6 +133,12 @@ class NodeMatcher {
             return 0f
         }
 
+        // If spec explicitly requires non-editable, reject editable nodes (e.g., search bar vs search results)
+        if (spec.isEditable == false) {
+            val isEditable = try { node.isEditable } catch (e: Exception) { false }
+            if (isEditable) return 0f
+        }
+
         val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeHint = try { node.hintText?.toString() ?: "" } catch (e: Exception) { "" }

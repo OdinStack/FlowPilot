@@ -56,7 +56,7 @@ RULES:
 - If the user command expresses the general intent of a workflow even without parameters (e.g. 'calculate' or 'add' matches 'add two numbers on calculator', 'order food' matches 'order on zomato'), set matched=true, set confidence=0.85, leave extracted_slots empty for what wasn't mentioned, and list the missing slots in missing_required_slots so the assistant can prompt for them.
 - QUANTITY: If the user says a number before a noun (e.g. "two pizzas", "3 shirts"), extract it as quantity slot. "Order two Margheritas" → extracted_slots: {"quantity": "2", "item": "Margherita"}
 - ADDRESS: If the user mentions "deliver to Work/Home/Office" or "to my work/home address", extract as address slot.
-- OPERATION: For calculator workflows, if the user says "multiply/subtract/divide/add", extract as operation slot.
+- OPERATION: For calculator workflows, ALL arithmetic operations (add, subtract, multiply, divide) use the SAME workflow. If the user says "multiply/subtract/divide/add/times/plus/minus", extract as operation slot. A workflow taught as "add two numbers" matches "multiply 7 and 8", "subtract 15 and 3", "divide 100 and 5" — they are the SAME workflow with different operation slots.
 """
 
         private const val SLOT_EXTRACTION_SYSTEM_PROMPT = """
@@ -97,6 +97,26 @@ Keep questions short and clear. Return only the question text, nothing else.
     ): IntentResult {
         if (storedFlows.isEmpty()) {
             return IntentResult.NoFlows
+        }
+
+        // Step 0: Keyword-based operation generalization for calculator workflows
+        // "multiply 7 and 8" should match a learned "add two numbers" workflow
+        val lowerCommand = command.lowercase()
+        val calculatorKeywords = listOf("add", "subtract", "multiply", "divide", "plus", "minus", "times", "calculate", "sum")
+        if (calculatorKeywords.any { lowerCommand.contains(it) }) {
+            val calcFlow = storedFlows.find { it.targetAppPackage.contains("calc", ignoreCase = true) }
+            if (calcFlow != null) {
+                Log.i(TAG, "Keyword-matched calculator workflow '${calcFlow.name}' for command: $command")
+                val slots = extractSlots(command, calcFlow)
+                val missingRequired = calcFlow.slots
+                    .filter { it.value.isRequired && !slots.containsKey(it.key) }
+                    .keys.toList()
+                return if (missingRequired.isEmpty()) {
+                    IntentResult.Matched(calcFlow, slots, 0.90f)
+                } else {
+                    IntentResult.NeedsClarification(calcFlow, missingRequired)
+                }
+            }
         }
 
         // Step 1: Try embedding similarity for fast matching

@@ -188,7 +188,14 @@ class TeachingCoordinator(
             "zepto" to listOf("zepto"),
             "whatsapp" to listOf("whatsapp"),
             "youtube" to listOf("youtube"),
-            "spotify" to listOf("spotify")
+            "spotify" to listOf("spotify"),
+            "myntra" to listOf("myntra"),
+            "bigbasket" to listOf("bigbasket"),
+            "jiomart" to listOf("jiomart"),
+            "meesho" to listOf("meesho"),
+            "nykaa" to listOf("nykaa", "fso"),
+            "phonepe" to listOf("phonepe"),
+            "paytm" to listOf("paytm")
         )
 
         for ((keyword, tokens) in commonKeywords) {

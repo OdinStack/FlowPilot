@@ -415,6 +415,8 @@ class ReplayEngine(
         if (result.success) {
             // Dismiss soft keyboard ONLY if an actual soft keyboard window is open on screen
             dismissSoftKeyboardIfPresent(service, actionExecutor)
+            // Wait for search results to load after typing in a search field
+            delay(1500)
             return result
         }
 

@@ -218,11 +218,13 @@ fun HomeScreen(
             else -> {
                 UnifiedInputField(
                     isListening = isListening,
+                    systemMode = systemState.mode,
                     onMicTapped = { viewModel.onMicTapped() },
                     onSendCommand = { command ->
                         viewModel.submitTextCommand(command)
                     },
-                    onStopListening = { viewModel.onMicTapped() }
+                    onStopListening = { viewModel.onMicTapped() },
+                    onForceStop = { viewModel.forceStop() }
                 )
             }
         }
@@ -779,9 +781,11 @@ fun ServiceStatusCard(isConnected: Boolean) {
 @Composable
 fun UnifiedInputField(
     isListening: Boolean,
+    systemMode: SystemMode,
     onMicTapped: () -> Unit,
     onSendCommand: (String) -> Unit,
     onStopListening: () -> Unit,
+    onForceStop: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var text by remember { mutableStateOf("") }
@@ -814,33 +818,56 @@ fun UnifiedInputField(
             label = "scaleAnim"
         )
 
-        Box(contentAlignment = Alignment.Center) {
-            if (isListening) {
-                Box(
-                    modifier = Modifier
-                        .size(96.dp)
-                        .scale(scale)
-                        .background(
-                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
-                            shape = CircleShape
-                        )
-                )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                if (isListening) {
+                    Box(
+                        modifier = Modifier
+                            .size(96.dp)
+                            .scale(scale)
+                            .background(
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
+                                shape = CircleShape
+                            )
+                    )
+                }
+                FloatingActionButton(
+                    onClick = {
+                        if (isListening) onStopListening() else onMicTapped()
+                    },
+                    modifier = Modifier.size(72.dp),
+                    containerColor = if (isListening) MaterialTheme.colorScheme.error
+                                     else MaterialTheme.colorScheme.primary,
+                    shape = CircleShape
+                ) {
+                    Icon(
+                        imageVector = if (isListening) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = if (isListening) "Stop Listening" else "Start Listening",
+                        modifier = Modifier.size(32.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
             }
-            FloatingActionButton(
-                onClick = {
-                    if (isListening) onStopListening() else onMicTapped()
-                },
-                modifier = Modifier.size(72.dp),
-                containerColor = if (isListening) MaterialTheme.colorScheme.error
-                                 else MaterialTheme.colorScheme.primary,
-                shape = CircleShape
-            ) {
-                Icon(
-                    imageVector = if (isListening) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = if (isListening) "Stop Listening" else "Start Listening",
-                    modifier = Modifier.size(32.dp),
-                    tint = MaterialTheme.colorScheme.onPrimary
-                )
+
+            // Force Stop button — visible during active operations
+            if (systemMode != SystemMode.IDLE && systemMode != SystemMode.ERROR) {
+                Spacer(modifier = Modifier.width(16.dp))
+                FloatingActionButton(
+                    onClick = onForceStop,
+                    modifier = Modifier.size(48.dp),
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                    shape = CircleShape
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "Force Stop",
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
         }
 

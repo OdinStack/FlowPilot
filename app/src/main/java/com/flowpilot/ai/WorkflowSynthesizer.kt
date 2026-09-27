@@ -25,6 +25,11 @@ RULES:
 4. Mark credential/payment boundaries where the workflow should stop.
 5. Generate a human-readable flow name and description.
 6. Determine which parameters are required vs optional.
+7. For food ordering workflows (Zomato, Swiggy, etc.), ALWAYS create these slots as required:
+  * "restaurant" (the restaurant name, e.g., "Domino's") — is_required: true, is_variable: true
+  * "item" or "dish" (the food item, e.g., "Margherita pizza") — is_required: true, is_variable: true
+8. If the user's voice command mentions both a restaurant and a dish, set both as required slots with the mentioned values as defaults
+9. For e-commerce apps (Amazon, Flipkart, Myntra), ALWAYS create a "search_term" or "product" slot as required
 
 OUTPUT FORMAT (JSON):
 {
@@ -76,6 +81,14 @@ IMPORTANT:
 - Include scroll_to_find: true for steps where the target might be below the visible area
 - For main search bars with rotating promotional text (like 'Search "sweet cravings"' or 'Search "light meals"'), DO NOT put the rotating phrase in target.text; instead set target.text = null, target.text_contains = "Search", and target.semantic = "restaurant or product search bar".
 - If the user selected a saved delivery address (like "Home" or "Work" on a "Select a saved address" prompt), parameterize it with slot "address" (default_value: "Home", is_required: false) and set target.semantic = "saved delivery address". Never confuse a delivery location field ("Search location manually") with a restaurant/product search bar.
+- After a TYPE step that enters text into a search bar, the NEXT step that clicks a search result MUST use:
+  * type: "CLICK" (or "FIND_AND_CLICK")
+  * target.text_contains = the search term (e.g., "Domino's") — NOT the exact full result text
+  * target.semantic = "search result item" or "restaurant card" or "product listing"
+  * scroll_to_find: true
+  * target.is_editable = false (to EXCLUDE the search bar from matching)
+  * Do NOT set target.text to the same text typed in search — it would match the search bar input itself
+- For food delivery apps (Zomato, Swiggy), after searching for a restaurant, the click target is the restaurant card showing the restaurant name, rating, and delivery time. Set target.text_contains to the restaurant name and target.context_text_contains to include a rating indicator like a number or star.
 - type field MUST be one of: OPEN_APP, CLICK, TYPE, SCROLL, FIND_AND_CLICK, CONDITIONAL, BACK
 """
     }
