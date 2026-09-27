@@ -373,6 +373,26 @@ class ReplayEngine(
             }
         }
 
+        // 4. Fallback: search-related semantic targets — look for search icons/buttons
+        val semantic = step.target.semantic?.lowercase() ?: ""
+        val specText = (step.target.text ?: step.target.textContains ?: "").lowercase()
+        val isSearchRelated = semantic.contains("search") || specText.contains("search") || 
+            step.description.lowercase().contains("search")
+        if (isSearchRelated) {
+            val root = service.rootInActiveWindow
+            if (root != null) {
+                val searchNode = findSearchIcon(root)
+                if (searchNode != null) {
+                    Log.i(TAG, "Found search icon/button as fallback for search-related step")
+                    val success = actionExecutor.click(searchNode)
+                    if (success) {
+                        delay(1000)
+                        return StepResult(step.index, true, "CLICK", "Clicked search icon as fallback", 0)
+                    }
+                }
+            }
+        }
+
         val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: step.target.resourceId ?: "target element"
         val errorDetail = if (step.scrollToFind) {
             "Could not locate \"$targetDesc\" even after scrolling down ${Constants.MAX_SCROLL_ATTEMPTS} times."
@@ -424,6 +444,29 @@ class ReplayEngine(
         val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, textToType)
         if (keypadResult != null) {
             return keypadResult
+        }
+
+        // Fallback for search-related TYPE steps: try clicking search icon first
+        val semantic2 = step.target.semantic?.lowercase() ?: ""
+        val isSearchType = semantic2.contains("search") || step.description.lowercase().contains("search")
+        if (isSearchType && !result.success) {
+            val root2 = service.rootInActiveWindow
+            if (root2 != null) {
+                val searchIcon = findSearchIcon(root2)
+                if (searchIcon != null) {
+                    Log.i(TAG, "TYPE fallback: clicking search icon first, then retrying type")
+                    actionExecutor.click(searchIcon)
+                    delay(1000)
+                    val retryResult = findAndAct(service, step, slots, "TYPE") { node ->
+                        actionExecutor.setText(node, textToType)
+                    }
+                    if (retryResult.success) {
+                        dismissSoftKeyboardIfPresent(service, actionExecutor)
+                        delay(1500)
+                        return retryResult
+                    }
+                }
+            }
         }
 
         return result
@@ -590,6 +633,22 @@ class ReplayEngine(
             delay(500)
         }
 
+        // ─── FALLBACK: Direct text-in-tree search with clickable parent walk-up ───
+        val targetText = resolveTargetText(step, slots)
+        if (targetText != null) {
+            val root = service.rootInActiveWindow
+            if (root != null) {
+                val textNode = findTextInTree(root, targetText)
+                if (textNode != null) {
+                    Log.i(TAG, "findTextInTree fallback found '$targetText' — clicking")
+                    val success = action(textNode)
+                    if (success) {
+                        return StepResult(step.index, true, actionName, "Found '$targetText' via text-in-tree fallback", 0)
+                    }
+                }
+            }
+        }
+
         // ─── LAST RESORT: Cross-app LLM element mapping ───
         if (geminiClient != null) {
             Log.i(TAG, "Attempting cross-app LLM element mapping for step: ${step.description}")
@@ -619,6 +678,39 @@ class ReplayEngine(
             } catch (e: Exception) {
                 // Stale node safe
             }
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find a search icon/button on the current screen.
+     * Apps like Myntra, Flipkart use search icons instead of visible search bars.
+     */
+    private fun findSearchIcon(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                if (node.isVisibleToUser && (node.isClickable || node.isFocusable)) {
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+
+                    if (desc.contains("search") || resId.contains("search") || 
+                        text == "search" || desc == "search" ||
+                        resId.contains("action_search") || resId.contains("search_icon") ||
+                        resId.contains("ic_search") || resId.contains("menu_search") ||
+                        resId.contains("search_button")) {
+                        return node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (e: Exception) {}
             return null
         }
         return search(root, 0)

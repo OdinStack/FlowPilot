@@ -75,6 +75,8 @@ class SafetyDetector {
         fun checkNode(node: AccessibilityNodeInfo, depth: Int): Boolean {
             if (depth > 25) return false
             try {
+                // Only check VISIBLE nodes — Amazon/Flipkart have hidden WebView login forms
+                if (!node.isVisibleToUser) return false
                 if (node.isPassword) return true
 
                 if (node.isEditable) {
