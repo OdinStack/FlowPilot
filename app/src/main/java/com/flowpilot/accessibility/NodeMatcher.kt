@@ -133,6 +133,12 @@ class NodeMatcher {
             return 0f
         }
 
+        // If spec explicitly requires non-editable, reject editable nodes (e.g., search bar vs search results)
+        if (spec.isEditable == false) {
+            val isEditable = try { node.isEditable } catch (e: Exception) { false }
+            if (isEditable) return 0f
+        }
+
         val nodeText = try { node.text?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeDesc = try { node.contentDescription?.toString() ?: "" } catch (e: Exception) { "" }
         val nodeHint = try { node.hintText?.toString() ?: "" } catch (e: Exception) { "" }
@@ -262,6 +268,29 @@ class NodeMatcher {
             }
         }
 
+        // DESCENDANT TEXT AGGREGATION for clickable containers (e.g., Zomato restaurant cards)
+        // When a clickable node has no direct text but its children contain the target text,
+        // give it a score based on the child text match.
+        if (node.isClickable && nodeText.isBlank() && nodeDesc.isBlank()) {
+            val targetText = spec.textContains ?: spec.text
+            if (targetText != null) {
+                val childTexts = collectDescendantTexts(node, maxDepth = 3)
+                val childCombined = childTexts.joinToString(" ")
+                if (childCombined.contains(targetText, ignoreCase = true)) {
+                    // Found target text in descendants of this clickable container
+                    val descendantScore = 0.88f
+                    if (descendantScore > score / maxOf(totalWeight, 0.01f)) {
+                        return descendantScore
+                    }
+                } else if (childCombined.lowercase().fuzzyContains(targetText.lowercase())) {
+                    val descendantScore = 0.72f
+                    if (descendantScore > score / maxOf(totalWeight, 0.01f)) {
+                        return descendantScore
+                    }
+                }
+            }
+        }
+
         // 3. Content description match (weight: 0.15)
         if (spec.contentDescription != null) {
             totalWeight += 0.15f
@@ -313,6 +342,33 @@ class NodeMatcher {
         }
 
         return if (totalWeight > 0f) (score / totalWeight).coerceIn(0f, 1f) else 0f
+    }
+
+    /**
+     * Collect all text from descendant nodes up to maxDepth levels.
+     * Used for matching clickable containers whose text is in child views.
+     */
+    private fun collectDescendantTexts(node: AccessibilityNodeInfo, maxDepth: Int): List<String> {
+        val texts = mutableListOf<String>()
+        fun traverse(n: AccessibilityNodeInfo, depth: Int) {
+            if (depth > maxDepth) return
+            try {
+                n.text?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
+                n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
+                for (i in 0 until n.childCount) {
+                    val child = try { n.getChild(i) } catch (e: Exception) { null } ?: continue
+                    traverse(child, depth + 1)
+                    try { child.recycle() } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+        // Start from children (not the node itself, since we already checked its text)
+        for (i in 0 until node.childCount) {
+            val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+            traverse(child, 1)
+            try { child.recycle() } catch (_: Exception) {}
+        }
+        return texts
     }
 
     /**

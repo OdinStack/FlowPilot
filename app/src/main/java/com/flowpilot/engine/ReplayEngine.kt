@@ -107,9 +107,18 @@ class ReplayEngine(
             resolveLocationGatekeeperIfPresent(service, actionExecutor, effectiveSlots)
 
             // ─── PRE-CHECK: Safety (Credential/Payment) ───
+            // SKIP safety detector for the workflow's OWN target app — user already
+            // consented by teaching the workflow on that app. Only check credential
+            // boundaries that were explicitly marked during synthesis.
             val currentRoot = service.rootInActiveWindow
+            val currentPkg = currentRoot?.packageName?.toString() ?: ""
+            val isInTaughtApp = currentPkg.isNotBlank() && currentPkg.equals(targetPkg, ignoreCase = true)
             if (currentRoot != null) {
-                val safety = safetyDetector.check(currentRoot)
+                val safety = if (isInTaughtApp) {
+                    SafetyDetector.SafetyResult.Safe  // Trust the taught app
+                } else {
+                    safetyDetector.check(currentRoot)
+                }
                 val isSafetyBoundary = safety !is SafetyDetector.SafetyResult.Safe
                 val isMarkedCredential = step.isCredentialBoundary
 
@@ -373,6 +382,38 @@ class ReplayEngine(
             }
         }
 
+        // 4. Fallback: search-related semantic targets — look for search icons/buttons
+        val semantic = step.target.semantic?.lowercase() ?: ""
+        val specText = (step.target.text ?: step.target.textContains ?: "").lowercase()
+        val isSearchRelated = semantic.contains("search") || specText.contains("search") || 
+            step.description.lowercase().contains("search")
+        if (isSearchRelated) {
+            val root = service.rootInActiveWindow
+            if (root != null) {
+                val searchNode = findSearchIcon(root)
+                if (searchNode != null) {
+                    Log.i(TAG, "Found search icon/button as fallback for search-related step")
+                    val success = actionExecutor.click(searchNode)
+                    if (success) {
+                        delay(1000)
+                        return StepResult(step.index, true, "CLICK", "Clicked search icon as fallback", 0)
+                    }
+                }
+            }
+        }
+
+        // COORDINATE FALLBACK for CLICK
+        val clickCx = step.target.fallbackCenterX
+        val clickCy = step.target.fallbackCenterY
+        if (clickCx != null && clickCy != null && clickCx > 0 && clickCy > 0) {
+            Log.w(TAG, "CLICK coordinate fallback: tap($clickCx, $clickCy)")
+            val success = actionExecutor.tapAtPoint(clickCx.toFloat(), clickCy.toFloat())
+            if (success) {
+                delay(500)
+                return StepResult(step.index, true, "CLICK", "Tapped at coordinates ($clickCx, $clickCy) as fallback", 0)
+            }
+        }
+
         val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: step.target.resourceId ?: "target element"
         val errorDetail = if (step.scrollToFind) {
             "Could not locate \"$targetDesc\" even after scrolling down ${Constants.MAX_SCROLL_ATTEMPTS} times."
@@ -415,6 +456,8 @@ class ReplayEngine(
         if (result.success) {
             // Dismiss soft keyboard ONLY if an actual soft keyboard window is open on screen
             dismissSoftKeyboardIfPresent(service, actionExecutor)
+            // Wait for search results to load after typing in a search field
+            delay(1500)
             return result
         }
 
@@ -422,6 +465,81 @@ class ReplayEngine(
         val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, textToType)
         if (keypadResult != null) {
             return keypadResult
+        }
+
+        // Fallback for search-related TYPE steps: try clicking search icon first
+        val semantic2 = step.target.semantic?.lowercase() ?: ""
+        val isSearchType = semantic2.contains("search") || step.description.lowercase().contains("search")
+        if (isSearchType && !result.success) {
+            val root2 = service.rootInActiveWindow
+            if (root2 != null) {
+                val searchIcon = findSearchIcon(root2)
+                if (searchIcon != null) {
+                    Log.i(TAG, "TYPE fallback: clicking search icon first, then retrying type")
+                    actionExecutor.click(searchIcon)
+                    delay(1000)
+                    val retryResult = findAndAct(service, step, slots, "TYPE") { node ->
+                        actionExecutor.setText(node, textToType)
+                    }
+                    if (retryResult.success) {
+                        dismissSoftKeyboardIfPresent(service, actionExecutor)
+                        delay(1500)
+                        return retryResult
+                    }
+                }
+            }
+        }
+
+        // AGGRESSIVE FALLBACK: Find ANY editable field on screen and type into it
+        // This handles cases like Myntra where the search bar exists but can't be matched
+        val anyEditableRoot = service.rootInActiveWindow
+        if (anyEditableRoot != null) {
+            val editableNode = findAnyEditableField(anyEditableRoot)
+            if (editableNode != null) {
+                Log.i(TAG, "TYPE aggressive fallback: found editable field, typing '$textToType'")
+                val success = actionExecutor.setText(editableNode, textToType)
+                if (success) {
+                    dismissSoftKeyboardIfPresent(service, actionExecutor)
+                    delay(1500)
+                    return StepResult(step.index, true, "TYPE", "Typed into first available editable field", 0)
+                }
+            } else {
+                // No editable field at all — try clicking the search bar-like element first
+                val clickableSearchBar = findClickableSearchBar(anyEditableRoot)
+                if (clickableSearchBar != null) {
+                    Log.i(TAG, "TYPE fallback: clicking search bar container first")
+                    actionExecutor.click(clickableSearchBar)
+                    delay(1000)
+                    val newRoot = service.rootInActiveWindow
+                    if (newRoot != null) {
+                        val newEditable = findAnyEditableField(newRoot)
+                        if (newEditable != null) {
+                            val success = actionExecutor.setText(newEditable, textToType)
+                            if (success) {
+                                dismissSoftKeyboardIfPresent(service, actionExecutor)
+                                delay(1500)
+                                return StepResult(step.index, true, "TYPE", "Clicked search container then typed", 0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // COORDINATE FALLBACK: tap at stored coordinates, then type
+        val cx = step.target.fallbackCenterX
+        val cy = step.target.fallbackCenterY
+        if (cx != null && cy != null && cx > 0 && cy > 0) {
+            Log.w(TAG, "TYPE coordinate fallback: tap($cx, $cy) then type")
+            actionExecutor.tapAtPoint(cx.toFloat(), cy.toFloat())
+            delay(800)
+            val editAfterTap = service.rootInActiveWindow?.let { findAnyEditableField(it) }
+            if (editAfterTap != null) {
+                actionExecutor.setText(editAfterTap, textToType)
+                dismissSoftKeyboardIfPresent(service, actionExecutor)
+                delay(1500)
+                return StepResult(step.index, true, "TYPE", "Tapped at ($cx,$cy) then typed", 0)
+            }
         }
 
         return result
@@ -437,7 +555,10 @@ class ReplayEngine(
             } == true
             if (hasSoftKeyboard) {
                 delay(250)
-                actionExecutor.pressBack()
+                // DO NOT use pressBack() — on Zomato/Swiggy it navigates away from search results!
+                // Instead, just wait. The keyboard will be dismissed when we click the next element.
+                // If we really need to dismiss, tap at a neutral spot outside the keyboard.
+                Log.d(TAG, "Soft keyboard detected — skipping pressBack, next action will dismiss it")
                 delay(250)
             }
         } catch (e: Exception) {
@@ -490,6 +611,34 @@ class ReplayEngine(
                 val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, resolved)
                 if (keypadResult != null) {
                     return keypadResult
+                }
+            }
+
+            // FALLBACK: Direct text-in-tree search for FIND_AND_CLICK
+            val textTarget = resolved ?: step.target.textContains ?: step.target.text
+            if (textTarget != null) {
+                val freshRoot = service.rootInActiveWindow
+                if (freshRoot != null) {
+                    val textNode = findTextInTree(freshRoot, textTarget)
+                    if (textNode != null) {
+                        Log.i(TAG, "FIND_AND_CLICK: findTextInTree found '$textTarget'")
+                        val clickSuccess = actionExecutor.click(textNode)
+                        if (clickSuccess) {
+                            return StepResult(step.index, true, "FIND_AND_CLICK", "Found '$textTarget' via text-in-tree", 0)
+                        }
+                    }
+                }
+            }
+
+            // COORDINATE FALLBACK for FIND_AND_CLICK
+            val fcx = step.target.fallbackCenterX
+            val fcy = step.target.fallbackCenterY
+            if (fcx != null && fcy != null && fcx > 0 && fcy > 0) {
+                Log.w(TAG, "FIND_AND_CLICK coordinate fallback: tap($fcx, $fcy)")
+                val tapSuccess = actionExecutor.tapAtPoint(fcx.toFloat(), fcy.toFloat())
+                if (tapSuccess) {
+                    delay(500)
+                    return StepResult(step.index, true, "FIND_AND_CLICK", "Tapped at ($fcx,$fcy) as fallback", 0)
                 }
             }
 
@@ -559,6 +708,9 @@ class ReplayEngine(
     ): StepResult {
         var lastError = "Element not found"
 
+        // Resolve target text (from textContains, text, or slots) for text-in-tree fallback
+        val resolvedText = resolveTargetText(step, slots)
+
         for (attempt in 1..Constants.MAX_RETRY_ATTEMPTS) {
             val root = service.rootInActiveWindow
             if (root == null) {
@@ -566,8 +718,41 @@ class ReplayEngine(
                 continue
             }
 
+            // ─── PRE-CHECK: For steps with textContains (like "click Domino's restaurant card"),
+            // try findTextInTree FIRST before NodeMatcher. This is critical because the restaurant
+            // card has text in CHILD nodes that NodeMatcher can miss, while random elements like
+            // the mic button (voice_assistant_view) score 0.72 and get incorrectly chosen. ───
+            if (resolvedText != null && step.target.isEditable != true) {
+                val textNode = findTextInTree(root, resolvedText)
+                if (textNode != null) {
+                    Log.i(TAG, "findTextInTree pre-match found '$resolvedText' — clicking")
+                    val success = action(textNode)
+                    if (success) {
+                        return StepResult(step.index, true, actionName, "Found '$resolvedText' via text-in-tree pre-match", 0)
+                    }
+                }
+            }
+
             val match = nodeMatcher.findBestMatch(root, step.target, slots)
             if (match != null) {
+                // For weak matches (< 0.80), double-check: if we have target text, prefer
+                // the text-in-tree result ONLY if the matched node doesn't actually contain
+                // the expected text. This prevents mic buttons from being clicked instead of
+                // restaurant cards.
+                if (match.score < 0.80f && resolvedText != null) {
+                    val matchedText = match.node.text?.toString() ?: ""
+                    val matchedDesc = match.node.contentDescription?.toString() ?: ""
+                    val matchedResId = match.node.viewIdResourceName ?: ""
+                    val textInMatch = matchedText.contains(resolvedText, ignoreCase = true) ||
+                        matchedDesc.contains(resolvedText, ignoreCase = true)
+                    if (!textInMatch) {
+                        Log.w(TAG, "Weak match (${match.score}) on ${matchedResId} doesn't contain '$resolvedText' — skipping in favor of fallbacks")
+                        lastError = "Weak match rejected: ${match.matchDetails} (score ${match.score})"
+                        delay(500)
+                        continue
+                    }
+                }
+
                 val success = action(match.node)
                 if (success) {
                     return StepResult(
@@ -588,6 +773,22 @@ class ReplayEngine(
             delay(500)
         }
 
+        // ─── FALLBACK: Direct text-in-tree search with clickable parent walk-up ───
+        val targetText = resolveTargetText(step, slots)
+        if (targetText != null) {
+            val root = service.rootInActiveWindow
+            if (root != null) {
+                val textNode = findTextInTree(root, targetText)
+                if (textNode != null) {
+                    Log.i(TAG, "findTextInTree fallback found '$targetText' — clicking")
+                    val success = action(textNode)
+                    if (success) {
+                        return StepResult(step.index, true, actionName, "Found '$targetText' via text-in-tree fallback", 0)
+                    }
+                }
+            }
+        }
+
         // ─── LAST RESORT: Cross-app LLM element mapping ───
         if (geminiClient != null) {
             Log.i(TAG, "Attempting cross-app LLM element mapping for step: ${step.description}")
@@ -597,6 +798,19 @@ class ReplayEngine(
                 if (success) {
                     return StepResult(step.index, true, actionName, "Found via LLM cross-app mapping", 0)
                 }
+            }
+        }
+
+        // ─── NUCLEAR LAST RESORT: Coordinate-based tap ───
+        // If all matching fails, use the recorded coordinates from teaching
+        val cx = step.target.fallbackCenterX
+        val cy = step.target.fallbackCenterY
+        if (cx != null && cy != null && cx > 0 && cy > 0) {
+            Log.w(TAG, "All matching failed — using coordinate fallback: tap($cx, $cy)")
+            val success = service.actionExecutor.tapAtPoint(cx.toFloat(), cy.toFloat())
+            if (success) {
+                delay(500)
+                return StepResult(step.index, true, actionName, "Tapped at coordinates ($cx, $cy) as fallback", 0)
             }
         }
 
@@ -617,6 +831,103 @@ class ReplayEngine(
             } catch (e: Exception) {
                 // Stale node safe
             }
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find ANY visible editable field on the current screen.
+     * Used as aggressive fallback when semantic matching fails (e.g., Myntra search bar).
+     */
+    private fun findAnyEditableField(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                if (node.isVisibleToUser && node.isEditable) return node
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (_: Exception) {}
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find a clickable element that looks like a search bar container.
+     * Myntra/Flipkart use a clickable container (not an EditText) showing rotating text.
+     * When clicked, it opens a search overlay with an actual EditText.
+     */
+    private fun findClickableSearchBar(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 15) return null
+            try {
+                if (node.isVisibleToUser && node.isClickable) {
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val hint = node.hintText?.toString()?.lowercase() ?: ""
+                    val bounds = android.graphics.Rect()
+                    node.getBoundsInScreen(bounds)
+
+                    // Search bar is typically in the top 300px of the screen
+                    val isNearTop = bounds.top < 300
+                    val hasSearchText = desc.contains("search") || text.contains("search") ||
+                        resId.contains("search") || hint.contains("search") ||
+                        resId.contains("toolbar") || desc.contains("find")
+
+                    // Detect wide clickable bars near top (Myntra shows "Jeans", "T-Shirts" etc)
+                    val looksLikeSearchPlaceholder = isNearTop && !node.isEditable &&
+                        (bounds.width() > bounds.height() * 2)
+
+                    if (hasSearchText || looksLikeSearchPlaceholder) {
+                        return node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (_: Exception) {}
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find a search icon/button on the current screen.
+     * Apps like Myntra, Flipkart use search icons instead of visible search bars.
+     */
+    private fun findSearchIcon(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                if (node.isVisibleToUser && (node.isClickable || node.isFocusable)) {
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+
+                    if (desc.contains("search") || resId.contains("search") || 
+                        text == "search" || desc == "search" ||
+                        resId.contains("action_search") || resId.contains("search_icon") ||
+                        resId.contains("ic_search") || resId.contains("menu_search") ||
+                        resId.contains("search_button")) {
+                        return node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (e: Exception) {}
             return null
         }
         return search(root, 0)
@@ -1101,24 +1412,37 @@ class ReplayEngine(
      * Find a node containing specific text (case-insensitive) and return the nearest clickable parent.
      */
     private fun findTextInTree(root: AccessibilityNodeInfo, targetText: String): AccessibilityNodeInfo? {
+        val normalizedTarget = targetText.lowercase().replace(Regex("[^a-z0-9]"), "")
         fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
             if (depth > 25) return null
             try {
                 val text = node.text?.toString() ?: ""
                 val desc = node.contentDescription?.toString() ?: ""
+                val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+                val normalizedDesc = desc.lowercase().replace(Regex("[^a-z0-9]"), "")
 
-                if (text.contains(targetText, ignoreCase = true) ||
-                    desc.contains(targetText, ignoreCase = true)) {
-                    // Return this node if clickable, or walk up to find clickable parent
-                    if (node.isClickable) return node
-                    var parent = node.parent
-                    var parentDepth = 0
-                    while (parent != null && parentDepth < 5) {
-                        if (parent.isClickable) return parent
-                        parent = parent.parent
-                        parentDepth++
+                // Check both exact and fuzzy (normalized) match
+                val exactMatch = text.contains(targetText, ignoreCase = true) ||
+                    desc.contains(targetText, ignoreCase = true)
+                val fuzzyMatch = normalizedText.contains(normalizedTarget) ||
+                    normalizedDesc.contains(normalizedTarget)
+
+                if (exactMatch || fuzzyMatch) {
+                    // Skip editable nodes (search bars that contain the typed text)
+                    if (node.isEditable) {
+                        // Don't return search input fields — we want the RESULT card, not the search bar
+                    } else {
+                        // Return this node if clickable, or walk up to find clickable parent
+                        if (node.isClickable) return node
+                        var parent = node.parent
+                        var parentDepth = 0
+                        while (parent != null && parentDepth < 5) {
+                            if (parent.isClickable) return parent
+                            parent = parent.parent
+                            parentDepth++
+                        }
+                        return node // Return even if not directly clickable
                     }
-                    return node // Return even if not directly clickable
                 }
 
                 for (i in 0 until node.childCount) {

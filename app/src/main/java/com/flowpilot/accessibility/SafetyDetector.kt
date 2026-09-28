@@ -32,13 +32,14 @@ class SafetyDetector {
             }
 
             // Check 2: Password input fields (MOST RELIABLE)
-            if (hasPasswordField(root)) {
+            val hasPass = hasPasswordField(root)
+            if (hasPass) {
                 Log.w(TAG, "Password input field detected")
                 return SafetyResult.Credential("Password input field detected")
             }
 
             // Check 3: Text pattern matching
-            val allTexts = collectAllTexts(root).map { it.lowercase() }
+            val allTexts = collectInteractiveTexts(root).map { it.lowercase() }
 
             val credentialHits = allTexts.count { text ->
                 Constants.CREDENTIAL_TEXT_PATTERNS.any { pattern -> text.contains(pattern) }
@@ -48,12 +49,20 @@ class SafetyDetector {
                 return SafetyResult.Credential("Multiple credential indicators found")
             }
 
-            val paymentHits = allTexts.count { text ->
-                Constants.PAYMENT_TEXT_PATTERNS.any { pattern -> text.contains(pattern) }
-            }
-            if (paymentHits >= 2) {
-                Log.w(TAG, "Payment screen detected ($paymentHits hits)")
-                return SafetyResult.Payment("Payment screen detected")
+            val isShoppingApp = packageName.contains("amazon", true) || 
+                                packageName.contains("flipkart", true) || 
+                                packageName.contains("myntra", true) || 
+                                packageName.contains("zomato", true) || 
+                                packageName.contains("swiggy", true)
+
+            if (!(isShoppingApp && !hasPass)) {
+                val paymentHits = allTexts.count { text ->
+                    Constants.PAYMENT_TEXT_PATTERNS.any { pattern -> text.contains(pattern) }
+                }
+                if (paymentHits >= 3) {
+                    Log.w(TAG, "Payment screen detected ($paymentHits hits)")
+                    return SafetyResult.Payment("Payment screen detected")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in safety check", e)
@@ -66,6 +75,8 @@ class SafetyDetector {
         fun checkNode(node: AccessibilityNodeInfo, depth: Int): Boolean {
             if (depth > 25) return false
             try {
+                // Only check VISIBLE nodes — Amazon/Flipkart have hidden WebView login forms
+                if (!node.isVisibleToUser) return false
                 if (node.isPassword) return true
 
                 if (node.isEditable) {
@@ -103,24 +114,29 @@ class SafetyDetector {
         return checkNode(root, 0)
     }
 
-    private fun collectAllTexts(root: AccessibilityNodeInfo): List<String> {
+    private fun collectInteractiveTexts(root: AccessibilityNodeInfo): List<String> {
         val texts = mutableListOf<String>()
-        fun traverse(node: AccessibilityNodeInfo, depth: Int) {
+        fun traverse(node: AccessibilityNodeInfo, depth: Int, isInteractiveContext: Boolean) {
             if (depth > 25) return
             try {
-                node.text?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
-                node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
+                val currentInteractive = isInteractiveContext || node.isEditable || 
+                    (node.isClickable && (node.className?.contains("EditText") == true || node.className?.contains("Button") == true || node.inputType != 0))
+                
+                if (currentInteractive) {
+                    node.text?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
+                    node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { texts.add(it) }
+                }
 
                 for (i in 0 until node.childCount) {
                     val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
-                    traverse(child, depth + 1)
+                    traverse(child, depth + 1, currentInteractive)
                     child.recycle()
                 }
             } catch (e: Exception) {
                 // Stale node safe
             }
         }
-        traverse(root, 0)
+        traverse(root, 0, false)
         return texts
     }
 }

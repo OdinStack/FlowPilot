@@ -25,6 +25,11 @@ RULES:
 4. Mark credential/payment boundaries where the workflow should stop.
 5. Generate a human-readable flow name and description.
 6. Determine which parameters are required vs optional.
+7. For food ordering workflows (Zomato, Swiggy, etc.), ALWAYS create these slots as required:
+  * "restaurant" (the restaurant name, e.g., "Domino's") — is_required: true, is_variable: true
+  * "item" or "dish" (the food item, e.g., "Margherita pizza") — is_required: true, is_variable: true
+8. If the user's voice command mentions both a restaurant and a dish, set both as required slots with the mentioned values as defaults
+9. For e-commerce apps (Amazon, Flipkart, Myntra), ALWAYS create a "search_term" or "product" slot as required
 
 OUTPUT FORMAT (JSON):
 {
@@ -56,7 +61,9 @@ OUTPUT FORMAT (JSON):
         "is_editable": false,
         "is_scrollable": false,
         "context_text_contains": "text of nearby elements for disambiguation",
-        "semantic": "human description of what this element is"
+        "semantic": "human description of what this element is",
+        "fallback_center_x": 540,
+        "fallback_center_y": 800
       },
       "value": "text to type (for TYPE actions), use {slot_name} for parameters",
       "scroll_to_find": false,
@@ -68,6 +75,7 @@ OUTPUT FORMAT (JSON):
 
 IMPORTANT:
 - Use {slot_name} syntax for parameter values in step targets and values
+- target.fallback_center_x and target.fallback_center_y: ALWAYS include these by extracting the center coordinates from the recorded action's bounds. These are used as a last-resort tap fallback when accessibility element matching fails. Calculate center_x = (left + right) / 2 and center_y = (top + bottom) / 2 from the action's target node bounds.
 - When an input value (such as a multi-digit number '10' or entered text) is a slot parameter, represent it as a SINGLE step with target.text = "{slot_name}" (or value = "{slot_name}"). DO NOT split it into separate steps for individual digits or characters. The replay engine handles sequential multi-digit typing automatically.
 - For parameterized steps (where target.text or value uses {slot_name}), DO NOT include a digit-specific or literal-specific resource_id (like digit_5); omit resource_id so the parameter value dynamically resolves.
 - For buttons that appear multiple times, ALWAYS include context_text_contains to disambiguate
@@ -76,6 +84,14 @@ IMPORTANT:
 - Include scroll_to_find: true for steps where the target might be below the visible area
 - For main search bars with rotating promotional text (like 'Search "sweet cravings"' or 'Search "light meals"'), DO NOT put the rotating phrase in target.text; instead set target.text = null, target.text_contains = "Search", and target.semantic = "restaurant or product search bar".
 - If the user selected a saved delivery address (like "Home" or "Work" on a "Select a saved address" prompt), parameterize it with slot "address" (default_value: "Home", is_required: false) and set target.semantic = "saved delivery address". Never confuse a delivery location field ("Search location manually") with a restaurant/product search bar.
+- After a TYPE step that enters text into a search bar, the NEXT step that clicks a search result MUST use:
+  * type: "CLICK" (or "FIND_AND_CLICK")
+  * target.text_contains = the search term (e.g., "Domino's") — NOT the exact full result text
+  * target.semantic = "search result item" or "restaurant card" or "product listing"
+  * scroll_to_find: true
+  * target.is_editable = false (to EXCLUDE the search bar from matching)
+  * Do NOT set target.text to the same text typed in search — it would match the search bar input itself
+- For food delivery apps (Zomato, Swiggy), after searching for a restaurant, the click target is the restaurant card showing the restaurant name, rating, and delivery time. Set target.text_contains to the restaurant name and target.context_text_contains to include a rating indicator like a number or star.
 - type field MUST be one of: OPEN_APP, CLICK, TYPE, SCROLL, FIND_AND_CLICK, CONDITIONAL, BACK
 """
     }
@@ -124,6 +140,8 @@ IMPORTANT:
                     if (target.isEditable) append(", editable")
                     if (target.isScrollable) append(", scrollable")
                     if (target.isClickable) append(", clickable")
+                    // Include bounds for coordinate fallback
+                    append(", bounds=(${target.bounds.left},${target.bounds.top},${target.bounds.right},${target.bounds.bottom})")
                     append("]")
                 }
                 if (action.type == ActionType.TYPE) {
@@ -228,7 +246,9 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
                         isEditable = targetObj["is_editable"]?.jsonPrimitive?.booleanOrNull,
                         isScrollable = targetObj["is_scrollable"]?.jsonPrimitive?.booleanOrNull,
                         contextTextContains = targetObj["context_text_contains"]?.jsonPrimitive?.contentOrNull,
-                        semantic = targetObj["semantic"]?.jsonPrimitive?.contentOrNull
+                        semantic = targetObj["semantic"]?.jsonPrimitive?.contentOrNull,
+                        fallbackCenterX = targetObj["fallback_center_x"]?.jsonPrimitive?.intOrNull,
+                        fallbackCenterY = targetObj["fallback_center_y"]?.jsonPrimitive?.intOrNull
                     )
                 } else TargetSpec()
 

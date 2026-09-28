@@ -75,6 +75,15 @@ class ScreenAnalyzer {
                 try {
                     val id = node.viewIdResourceName?.lowercase() ?: ""
                     val cls = node.className?.toString() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val combined = "$text $desc"
+
+                    if (combined.contains("microphone") || combined.contains("permission") || 
+                        combined.contains("grant") || combined.contains("not enabled")) {
+                        return true
+                    }
+                    
                     // Only match explicit dialog/modal IDs, not generic "overlay" or "bottom_sheet"
                     if (id.contains("dialog") || id.contains("popup") || id.contains("modal") ||
                         cls.contains("Dialog", ignoreCase = true) || cls.contains("AlertDialog", ignoreCase = true)) {

@@ -82,6 +82,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private var clarificationDeferred: CompletableDeferred<String?>? = null
     private var clarificationListenJob: Job? = null
 
+    private var replayJob: Job? = null
+
+    fun forceStop() {
+        Log.i(TAG, "Force stop requested")
+        replayJob?.cancel()
+        replayJob = null
+        if (teachingCoordinator.isTeaching.value) {
+            teachingCoordinator.cancelTeaching()
+        }
+        clarificationDeferred?.complete(null)
+        clarificationDeferred = null
+        stopClarificationListening()
+        _replayFailure.value = null
+        stateMachine.reset()
+        viewModelScope.launch(Dispatchers.Main) {
+            voiceManager.speak("Stopped.")
+        }
+    }
+
     private fun startClarificationListening(deferred: CompletableDeferred<String?>) {
         clarificationListenJob?.cancel()
         clarificationListenJob = viewModelScope.launch(Dispatchers.Main) {
@@ -195,8 +214,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-
-        viewModelScope.launch(Dispatchers.IO) {
+        replayJob?.cancel()
+        replayJob = viewModelScope.launch(Dispatchers.IO) {
             val startTime = System.currentTimeMillis()
             val result = replayEngine.execute(workflow, slotValues)
 
