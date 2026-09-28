@@ -555,7 +555,10 @@ class ReplayEngine(
             } == true
             if (hasSoftKeyboard) {
                 delay(250)
-                actionExecutor.pressBack()
+                // DO NOT use pressBack() — on Zomato/Swiggy it navigates away from search results!
+                // Instead, just wait. The keyboard will be dismissed when we click the next element.
+                // If we really need to dismiss, tap at a neutral spot outside the keyboard.
+                Log.d(TAG, "Soft keyboard detected — skipping pressBack, next action will dismiss it")
                 delay(250)
             }
         } catch (e: Exception) {
@@ -705,6 +708,9 @@ class ReplayEngine(
     ): StepResult {
         var lastError = "Element not found"
 
+        // Resolve target text (from textContains, text, or slots) for text-in-tree fallback
+        val resolvedText = resolveTargetText(step, slots)
+
         for (attempt in 1..Constants.MAX_RETRY_ATTEMPTS) {
             val root = service.rootInActiveWindow
             if (root == null) {
@@ -712,8 +718,41 @@ class ReplayEngine(
                 continue
             }
 
+            // ─── PRE-CHECK: For steps with textContains (like "click Domino's restaurant card"),
+            // try findTextInTree FIRST before NodeMatcher. This is critical because the restaurant
+            // card has text in CHILD nodes that NodeMatcher can miss, while random elements like
+            // the mic button (voice_assistant_view) score 0.72 and get incorrectly chosen. ───
+            if (resolvedText != null && step.target.isEditable != true) {
+                val textNode = findTextInTree(root, resolvedText)
+                if (textNode != null) {
+                    Log.i(TAG, "findTextInTree pre-match found '$resolvedText' — clicking")
+                    val success = action(textNode)
+                    if (success) {
+                        return StepResult(step.index, true, actionName, "Found '$resolvedText' via text-in-tree pre-match", 0)
+                    }
+                }
+            }
+
             val match = nodeMatcher.findBestMatch(root, step.target, slots)
             if (match != null) {
+                // For weak matches (< 0.80), double-check: if we have target text, prefer
+                // the text-in-tree result ONLY if the matched node doesn't actually contain
+                // the expected text. This prevents mic buttons from being clicked instead of
+                // restaurant cards.
+                if (match.score < 0.80f && resolvedText != null) {
+                    val matchedText = match.node.text?.toString() ?: ""
+                    val matchedDesc = match.node.contentDescription?.toString() ?: ""
+                    val matchedResId = match.node.viewIdResourceName ?: ""
+                    val textInMatch = matchedText.contains(resolvedText, ignoreCase = true) ||
+                        matchedDesc.contains(resolvedText, ignoreCase = true)
+                    if (!textInMatch) {
+                        Log.w(TAG, "Weak match (${match.score}) on ${matchedResId} doesn't contain '$resolvedText' — skipping in favor of fallbacks")
+                        lastError = "Weak match rejected: ${match.matchDetails} (score ${match.score})"
+                        delay(500)
+                        continue
+                    }
+                }
+
                 val success = action(match.node)
                 if (success) {
                     return StepResult(
@@ -1373,24 +1412,37 @@ class ReplayEngine(
      * Find a node containing specific text (case-insensitive) and return the nearest clickable parent.
      */
     private fun findTextInTree(root: AccessibilityNodeInfo, targetText: String): AccessibilityNodeInfo? {
+        val normalizedTarget = targetText.lowercase().replace(Regex("[^a-z0-9]"), "")
         fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
             if (depth > 25) return null
             try {
                 val text = node.text?.toString() ?: ""
                 val desc = node.contentDescription?.toString() ?: ""
+                val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+                val normalizedDesc = desc.lowercase().replace(Regex("[^a-z0-9]"), "")
 
-                if (text.contains(targetText, ignoreCase = true) ||
-                    desc.contains(targetText, ignoreCase = true)) {
-                    // Return this node if clickable, or walk up to find clickable parent
-                    if (node.isClickable) return node
-                    var parent = node.parent
-                    var parentDepth = 0
-                    while (parent != null && parentDepth < 5) {
-                        if (parent.isClickable) return parent
-                        parent = parent.parent
-                        parentDepth++
+                // Check both exact and fuzzy (normalized) match
+                val exactMatch = text.contains(targetText, ignoreCase = true) ||
+                    desc.contains(targetText, ignoreCase = true)
+                val fuzzyMatch = normalizedText.contains(normalizedTarget) ||
+                    normalizedDesc.contains(normalizedTarget)
+
+                if (exactMatch || fuzzyMatch) {
+                    // Skip editable nodes (search bars that contain the typed text)
+                    if (node.isEditable) {
+                        // Don't return search input fields — we want the RESULT card, not the search bar
+                    } else {
+                        // Return this node if clickable, or walk up to find clickable parent
+                        if (node.isClickable) return node
+                        var parent = node.parent
+                        var parentDepth = 0
+                        while (parent != null && parentDepth < 5) {
+                            if (parent.isClickable) return parent
+                            parent = parent.parent
+                            parentDepth++
+                        }
+                        return node // Return even if not directly clickable
                     }
-                    return node // Return even if not directly clickable
                 }
 
                 for (i in 0 until node.childCount) {
