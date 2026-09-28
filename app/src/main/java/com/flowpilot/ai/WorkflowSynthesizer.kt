@@ -61,7 +61,9 @@ OUTPUT FORMAT (JSON):
         "is_editable": false,
         "is_scrollable": false,
         "context_text_contains": "text of nearby elements for disambiguation",
-        "semantic": "human description of what this element is"
+        "semantic": "human description of what this element is",
+        "fallback_center_x": 540,
+        "fallback_center_y": 800
       },
       "value": "text to type (for TYPE actions), use {slot_name} for parameters",
       "scroll_to_find": false,
@@ -73,6 +75,7 @@ OUTPUT FORMAT (JSON):
 
 IMPORTANT:
 - Use {slot_name} syntax for parameter values in step targets and values
+- target.fallback_center_x and target.fallback_center_y: ALWAYS include these by extracting the center coordinates from the recorded action's bounds. These are used as a last-resort tap fallback when accessibility element matching fails. Calculate center_x = (left + right) / 2 and center_y = (top + bottom) / 2 from the action's target node bounds.
 - When an input value (such as a multi-digit number '10' or entered text) is a slot parameter, represent it as a SINGLE step with target.text = "{slot_name}" (or value = "{slot_name}"). DO NOT split it into separate steps for individual digits or characters. The replay engine handles sequential multi-digit typing automatically.
 - For parameterized steps (where target.text or value uses {slot_name}), DO NOT include a digit-specific or literal-specific resource_id (like digit_5); omit resource_id so the parameter value dynamically resolves.
 - For buttons that appear multiple times, ALWAYS include context_text_contains to disambiguate
@@ -137,6 +140,8 @@ IMPORTANT:
                     if (target.isEditable) append(", editable")
                     if (target.isScrollable) append(", scrollable")
                     if (target.isClickable) append(", clickable")
+                    // Include bounds for coordinate fallback
+                    append(", bounds=(${target.bounds.left},${target.bounds.top},${target.bounds.right},${target.bounds.bottom})")
                     append("]")
                 }
                 if (action.type == ActionType.TYPE) {
@@ -241,7 +246,9 @@ Analyze these actions and produce a generalized workflow JSON. Identify which va
                         isEditable = targetObj["is_editable"]?.jsonPrimitive?.booleanOrNull,
                         isScrollable = targetObj["is_scrollable"]?.jsonPrimitive?.booleanOrNull,
                         contextTextContains = targetObj["context_text_contains"]?.jsonPrimitive?.contentOrNull,
-                        semantic = targetObj["semantic"]?.jsonPrimitive?.contentOrNull
+                        semantic = targetObj["semantic"]?.jsonPrimitive?.contentOrNull,
+                        fallbackCenterX = targetObj["fallback_center_x"]?.jsonPrimitive?.intOrNull,
+                        fallbackCenterY = targetObj["fallback_center_y"]?.jsonPrimitive?.intOrNull
                     )
                 } else TargetSpec()
 

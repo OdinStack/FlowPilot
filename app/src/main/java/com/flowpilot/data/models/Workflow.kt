@@ -54,5 +54,9 @@ data class TargetSpec(
     val isEditable: Boolean? = null,
     val isScrollable: Boolean? = null,
     val contextTextContains: String? = null,
-    val semantic: String? = null
+    val semantic: String? = null,
+    // Fallback coordinates: center of the element during teaching.
+    // Used as LAST RESORT when accessibility matching fails.
+    val fallbackCenterX: Int? = null,
+    val fallbackCenterY: Int? = null
 )

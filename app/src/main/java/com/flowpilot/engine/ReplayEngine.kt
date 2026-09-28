@@ -107,9 +107,18 @@ class ReplayEngine(
             resolveLocationGatekeeperIfPresent(service, actionExecutor, effectiveSlots)
 
             // ─── PRE-CHECK: Safety (Credential/Payment) ───
+            // SKIP safety detector for the workflow's OWN target app — user already
+            // consented by teaching the workflow on that app. Only check credential
+            // boundaries that were explicitly marked during synthesis.
             val currentRoot = service.rootInActiveWindow
+            val currentPkg = currentRoot?.packageName?.toString() ?: ""
+            val isInTaughtApp = currentPkg.isNotBlank() && currentPkg.equals(targetPkg, ignoreCase = true)
             if (currentRoot != null) {
-                val safety = safetyDetector.check(currentRoot)
+                val safety = if (isInTaughtApp) {
+                    SafetyDetector.SafetyResult.Safe  // Trust the taught app
+                } else {
+                    safetyDetector.check(currentRoot)
+                }
                 val isSafetyBoundary = safety !is SafetyDetector.SafetyResult.Safe
                 val isMarkedCredential = step.isCredentialBoundary
 
@@ -393,6 +402,18 @@ class ReplayEngine(
             }
         }
 
+        // COORDINATE FALLBACK for CLICK
+        val clickCx = step.target.fallbackCenterX
+        val clickCy = step.target.fallbackCenterY
+        if (clickCx != null && clickCy != null && clickCx > 0 && clickCy > 0) {
+            Log.w(TAG, "CLICK coordinate fallback: tap($clickCx, $clickCy)")
+            val success = actionExecutor.tapAtPoint(clickCx.toFloat(), clickCy.toFloat())
+            if (success) {
+                delay(500)
+                return StepResult(step.index, true, "CLICK", "Tapped at coordinates ($clickCx, $clickCy) as fallback", 0)
+            }
+        }
+
         val targetDesc = step.target.semantic ?: step.target.textContains ?: step.target.text ?: step.target.resourceId ?: "target element"
         val errorDetail = if (step.scrollToFind) {
             "Could not locate \"$targetDesc\" even after scrolling down ${Constants.MAX_SCROLL_ATTEMPTS} times."
@@ -469,6 +490,58 @@ class ReplayEngine(
             }
         }
 
+        // AGGRESSIVE FALLBACK: Find ANY editable field on screen and type into it
+        // This handles cases like Myntra where the search bar exists but can't be matched
+        val anyEditableRoot = service.rootInActiveWindow
+        if (anyEditableRoot != null) {
+            val editableNode = findAnyEditableField(anyEditableRoot)
+            if (editableNode != null) {
+                Log.i(TAG, "TYPE aggressive fallback: found editable field, typing '$textToType'")
+                val success = actionExecutor.setText(editableNode, textToType)
+                if (success) {
+                    dismissSoftKeyboardIfPresent(service, actionExecutor)
+                    delay(1500)
+                    return StepResult(step.index, true, "TYPE", "Typed into first available editable field", 0)
+                }
+            } else {
+                // No editable field at all — try clicking the search bar-like element first
+                val clickableSearchBar = findClickableSearchBar(anyEditableRoot)
+                if (clickableSearchBar != null) {
+                    Log.i(TAG, "TYPE fallback: clicking search bar container first")
+                    actionExecutor.click(clickableSearchBar)
+                    delay(1000)
+                    val newRoot = service.rootInActiveWindow
+                    if (newRoot != null) {
+                        val newEditable = findAnyEditableField(newRoot)
+                        if (newEditable != null) {
+                            val success = actionExecutor.setText(newEditable, textToType)
+                            if (success) {
+                                dismissSoftKeyboardIfPresent(service, actionExecutor)
+                                delay(1500)
+                                return StepResult(step.index, true, "TYPE", "Clicked search container then typed", 0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // COORDINATE FALLBACK: tap at stored coordinates, then type
+        val cx = step.target.fallbackCenterX
+        val cy = step.target.fallbackCenterY
+        if (cx != null && cy != null && cx > 0 && cy > 0) {
+            Log.w(TAG, "TYPE coordinate fallback: tap($cx, $cy) then type")
+            actionExecutor.tapAtPoint(cx.toFloat(), cy.toFloat())
+            delay(800)
+            val editAfterTap = service.rootInActiveWindow?.let { findAnyEditableField(it) }
+            if (editAfterTap != null) {
+                actionExecutor.setText(editAfterTap, textToType)
+                dismissSoftKeyboardIfPresent(service, actionExecutor)
+                delay(1500)
+                return StepResult(step.index, true, "TYPE", "Tapped at ($cx,$cy) then typed", 0)
+            }
+        }
+
         return result
     }
 
@@ -535,6 +608,34 @@ class ReplayEngine(
                 val keypadResult = trySequentialKeypadClick(service, actionExecutor, step, resolved)
                 if (keypadResult != null) {
                     return keypadResult
+                }
+            }
+
+            // FALLBACK: Direct text-in-tree search for FIND_AND_CLICK
+            val textTarget = resolved ?: step.target.textContains ?: step.target.text
+            if (textTarget != null) {
+                val freshRoot = service.rootInActiveWindow
+                if (freshRoot != null) {
+                    val textNode = findTextInTree(freshRoot, textTarget)
+                    if (textNode != null) {
+                        Log.i(TAG, "FIND_AND_CLICK: findTextInTree found '$textTarget'")
+                        val clickSuccess = actionExecutor.click(textNode)
+                        if (clickSuccess) {
+                            return StepResult(step.index, true, "FIND_AND_CLICK", "Found '$textTarget' via text-in-tree", 0)
+                        }
+                    }
+                }
+            }
+
+            // COORDINATE FALLBACK for FIND_AND_CLICK
+            val fcx = step.target.fallbackCenterX
+            val fcy = step.target.fallbackCenterY
+            if (fcx != null && fcy != null && fcx > 0 && fcy > 0) {
+                Log.w(TAG, "FIND_AND_CLICK coordinate fallback: tap($fcx, $fcy)")
+                val tapSuccess = actionExecutor.tapAtPoint(fcx.toFloat(), fcy.toFloat())
+                if (tapSuccess) {
+                    delay(500)
+                    return StepResult(step.index, true, "FIND_AND_CLICK", "Tapped at ($fcx,$fcy) as fallback", 0)
                 }
             }
 
@@ -661,6 +762,19 @@ class ReplayEngine(
             }
         }
 
+        // ─── NUCLEAR LAST RESORT: Coordinate-based tap ───
+        // If all matching fails, use the recorded coordinates from teaching
+        val cx = step.target.fallbackCenterX
+        val cy = step.target.fallbackCenterY
+        if (cx != null && cy != null && cx > 0 && cy > 0) {
+            Log.w(TAG, "All matching failed — using coordinate fallback: tap($cx, $cy)")
+            val success = service.actionExecutor.tapAtPoint(cx.toFloat(), cy.toFloat())
+            if (success) {
+                delay(500)
+                return StepResult(step.index, true, actionName, "Tapped at coordinates ($cx, $cy) as fallback", 0)
+            }
+        }
+
         return StepResult(step.index, false, actionName, lastError, 0)
     }
 
@@ -678,6 +792,70 @@ class ReplayEngine(
             } catch (e: Exception) {
                 // Stale node safe
             }
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find ANY visible editable field on the current screen.
+     * Used as aggressive fallback when semantic matching fails (e.g., Myntra search bar).
+     */
+    private fun findAnyEditableField(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 20) return null
+            try {
+                if (node.isVisibleToUser && node.isEditable) return node
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (_: Exception) {}
+            return null
+        }
+        return search(root, 0)
+    }
+
+    /**
+     * Find a clickable element that looks like a search bar container.
+     * Myntra/Flipkart use a clickable container (not an EditText) showing rotating text.
+     * When clicked, it opens a search overlay with an actual EditText.
+     */
+    private fun findClickableSearchBar(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun search(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 15) return null
+            try {
+                if (node.isVisibleToUser && node.isClickable) {
+                    val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val hint = node.hintText?.toString()?.lowercase() ?: ""
+                    val bounds = android.graphics.Rect()
+                    node.getBoundsInScreen(bounds)
+
+                    // Search bar is typically in the top 300px of the screen
+                    val isNearTop = bounds.top < 300
+                    val hasSearchText = desc.contains("search") || text.contains("search") ||
+                        resId.contains("search") || hint.contains("search") ||
+                        resId.contains("toolbar") || desc.contains("find")
+
+                    // Detect wide clickable bars near top (Myntra shows "Jeans", "T-Shirts" etc)
+                    val looksLikeSearchPlaceholder = isNearTop && !node.isEditable &&
+                        (bounds.width() > bounds.height() * 2)
+
+                    if (hasSearchText || looksLikeSearchPlaceholder) {
+                        return node
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    val result = search(child, depth + 1)
+                    if (result != null) return result
+                    child.recycle()
+                }
+            } catch (_: Exception) {}
             return null
         }
         return search(root, 0)

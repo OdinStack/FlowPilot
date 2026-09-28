@@ -276,6 +276,11 @@ class ActionExecutor(private val service: AccessibilityService) {
     }
 
     /**
+     * Public tap at screen coordinates — used as last-resort fallback.
+     */
+    suspend fun tapAtPoint(x: Float, y: Float): Boolean = tapAtCoordinates(x, y)
+
+    /**
      * Tap at specific screen coordinates using gesture dispatch.
      */
     private suspend fun tapAtCoordinates(x: Float, y: Float): Boolean {
